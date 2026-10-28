@@ -36,7 +36,7 @@ class MQTTPub():
         try:            
             payload = json.dumps(dato)
         except (TypeError, ValueError) as e:
-            logger.exception("dato no serializable a JSON:%s", {e})
+            logger.exception("dato no serializable a JSON:%s",e)
             return False
 
         try: 
@@ -79,8 +79,8 @@ class MQTTPub():
          
     
     def _on_disconnect(self, client, userdata, disconnect_flags, reason_code, properties):
-        logger.info("Desconectado: ", reason_code)
-        logger.debug("Propiedades: ", properties)
+        logger.info("Desconectado: %s", reason_code)
+        logger.debug("Propiedades: %s", properties)
     
     def _on_publish(self, client, userdata, mid, reason_code, properties):
         if reason_code.is_failure:
@@ -94,7 +94,7 @@ class MQTTPub():
         try:
             self._client.connect(self._ip_broker, self._port_broker)
         except OSError:
-            logging.exception("No se pudo conectar al broker")
+            logger.exception("No se pudo conectar al broker")
             raise
         #si pudimos conectarnos entonces iniciamos el loop con el hilo aparte
         self._client.loop_start()
