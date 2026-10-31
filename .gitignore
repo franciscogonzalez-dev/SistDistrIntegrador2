@@ -1,0 +1,71 @@
+# ==========================================
+# Contexto y notas internas del asistente
+# ==========================================
+proyecto2-contexto/
+
+# ==========================================
+# Secretos y credenciales (REGLA DE ORO)
+# ==========================================
+.env
+*.env
+!.env.example
+
+# Claves privadas TLS (NUNCA deben subirse al repo)
+*.key
+certs/*.key
+broker/certs/*.key
+servicio/certs/*.key
+clientes/certs/*.key
+
+# ==========================================
+# Bases de datos y persistencia local
+# ==========================================
+*.db
+*.sqlite
+*.sqlite3
+servicio/data/
+
+# Datos y logs locales de EMQX (si se montan como volumen de Docker)
+broker/emqx_data/
+broker/emqx_log/
+
+# ==========================================
+# Python
+# ==========================================
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Entornos virtuales
+.venv/
+venv/
+env/
+ENV/
+
+# ==========================================
+# Entornos de desarrollo / IDEs y SO
+# ==========================================
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db

@@ -1,0 +1,24 @@
+services:
+  emqx:
+    image: emqx/emqx:5.8.0
+    container_name: emqx_broker
+    restart: unless-stopped
+    ports:
+      - "1883:1883"    # MQTT TCP estándar (pruebas y desarrollo)
+      - "8083:8083"    # MQTT WebSockets (necesario para el cliente web del Dashboard)
+      - "8883:8883"    # MQTT SSL/TLS seguro (requerimiento de la consigna)
+      - "18083:18083"  # Dashboard Web de administración de EMQX
+    environment:
+      - EMQX_NODE__NAME=emqx@127.0.0.1
+      # Credenciales iniciales del panel (cumple con no dejar admin/public)
+      - EMQX_DASHBOARD__DEFAULT_USERNAME=admin_sistdistr
+      - EMQX_DASHBOARD__DEFAULT_PASSWORD=SistDistr2026!
+    volumes:
+      - emqx_data:/opt/emqx/data
+      - emqx_log:/opt/emqx/log
+      # Montaje de certificados (para cuando habilitemos TLS en el puerto 8883)
+      - ./certs:/opt/emqx/certs:ro
+
+volumes:
+  emqx_data:
+  emqx_log:

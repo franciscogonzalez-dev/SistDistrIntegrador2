@@ -1,0 +1,47 @@
+{
+  "bom-01": {
+    "nombre": "Cuartel Central (Huergo 995)",
+    "coordenadas": [
+      [
+        -45.8587,
+        -67.489
+      ]
+    ]
+  },
+  "bom-02": {
+    "nombre": "Destacamento 1 (Av. Kennedy 1100)",
+    "coordenadas": [
+      [
+        -45.8628,
+        -67.5155
+      ]
+    ]
+  },
+  "bom-03": {
+    "nombre": "Destacamento 3 (Km 3, Álvaro Barros 27)",
+    "coordenadas": [
+      [
+        -45.8379,
+        -67.4824
+      ]
+    ]
+  },
+  "bom-04": {
+    "nombre": "Destacamento 2 Km 8 'Malvinas Argentinas' (Italo Dell'Oro)",
+    "coordenadas": [
+      [
+        -45.796,
+        -67.4386
+      ]
+    ]
+  },
+  "bom-05": {
+    "nombre": "Destacamento 4 Laprida (Jamaica 460)",
+    "coordenadas": [
+      [
+        -45.828,
+        -67.545
+      ]
+    ]
+  }
+}

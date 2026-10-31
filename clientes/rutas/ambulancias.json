@@ -1,0 +1,47 @@
+{
+  "amb-01": {
+    "nombre": "Hospital Regional Dr. V. M. Sanguinetti (Av. Yrigoyen 950)",
+    "coordenadas": [
+      [
+        -45.8684,
+        -67.4875
+      ]
+    ]
+  },
+  "amb-02": {
+    "nombre": "Hospital Zonal Alvear (Km 3, J. R. Balcarce)",
+    "coordenadas": [
+      [
+        -45.8344,
+        -67.4619
+      ]
+    ]
+  },
+  "amb-03": {
+    "nombre": "Clínica del Valle (Av. Alsina 656)",
+    "coordenadas": [
+      [
+        -45.8639,
+        -67.4944
+      ]
+    ]
+  },
+  "amb-04": {
+    "nombre": "Clínica Pueyrredón (Olavarría 292, Zona Sur)",
+    "coordenadas": [
+      [
+        -45.8821,
+        -67.521
+      ]
+    ]
+  },
+  "amb-05": {
+    "nombre": "Hospital Militar Regional (Km 8, Italo Dell'Oro 850)",
+    "coordenadas": [
+      [
+        -45.796,
+        -67.4286
+      ]
+    ]
+  }
+}
