@@ -13,14 +13,22 @@ Este módulo es un visor visual mínimo:
 import os
 import sys
 import json
+import argparse
+from pathlib import Path
 import tkinter as tk
 import tkintermapview
 import paho.mqtt.client as mqtt
 from paho.mqtt.enums import MQTTProtocolVersion
 
+# Raíz del proyecto y ruta por defecto de certificados
+ROOT_DIR = Path(__file__).resolve().parent.parent
+CA_CERTS_DEFAULT = str(ROOT_DIR / "broker" / "certs" / "ca.crt")
+
 # Parámetros por defecto
 IP_BROKER_DEFAULT = "127.0.0.1"
-PUERTO_BROKER_DEFAULT = 1883
+PUERTO_BROKER_DEFAULT = 8883
+USUARIO_DEFAULT = "desp-01"
+PASSWORD_DEFAULT = "clave_despachador"
 
 # Íconos para distinguir cada fuerza en el mapa
 ICONOS = {
@@ -31,12 +39,24 @@ ICONOS = {
 
 class DespachadorBasico:
     """
-    Ventana básica de monitoreo en tiempo real vía MQTT.
+    Ventana básica de monitoreo en tiempo real vía MQTT con soporte TLS.
     """
 
-    def __init__(self, ip_broker=IP_BROKER_DEFAULT, puerto=PUERTO_BROKER_DEFAULT):
+    def __init__(
+        self,
+        ip_broker=IP_BROKER_DEFAULT,
+        puerto=PUERTO_BROKER_DEFAULT,
+        client_id=USUARIO_DEFAULT,
+        usuario=USUARIO_DEFAULT,
+        password=PASSWORD_DEFAULT,
+        ca_certs=CA_CERTS_DEFAULT,
+    ):
         self.ip_broker = ip_broker
         self.puerto = puerto
+        self.client_id = client_id
+        self.usuario = usuario
+        self.password = password
+        self.ca_certs = ca_certs
 
         # Diccionario para guardar los marcadores activos en el mapa: { "amb-01": marker, ... }
         self.marcadores = {}
@@ -56,16 +76,25 @@ class DespachadorBasico:
         # 3. Configurar el cliente MQTT receptor
         self.cliente_mqtt = mqtt.Client(
             callback_api_version=mqtt.CallbackAPIVersion.VERSION2,
-            client_id="despachador_visor",
+            client_id=self.client_id,
             protocol=MQTTProtocolVersion.MQTTv5,
         )
+
+        # Credenciales de autenticación
+        if self.usuario:
+            self.cliente_mqtt.username_pw_set(username=self.usuario, password=self.password)
+
+        # Configuración TLS
+        if self.ca_certs and Path(self.ca_certs).exists():
+            self.cliente_mqtt.tls_set(ca_certs=str(self.ca_certs))
+            print(f"[*] TLS configurado con CA: {self.ca_certs}")
 
         self.cliente_mqtt.on_connect = self._on_connect
         self.cliente_mqtt.on_message = self._on_message
 
         # Conectar al broker e iniciar el hilo de red en segundo plano
         try:
-            print(f"[*] Conectando despachador a MQTT ({self.ip_broker}:{self.puerto})...")
+            print(f"[*] Conectando despachador a MQTT ({self.ip_broker}:{self.puerto}) [ID={self.client_id}]...")
             self.cliente_mqtt.connect(self.ip_broker, self.puerto, keepalive=60)
             self.cliente_mqtt.loop_start()
         except Exception as e:
@@ -155,8 +184,33 @@ class DespachadorBasico:
 # ==============================================================================
 
 if __name__ == "__main__":
-    broker = sys.argv[1] if len(sys.argv) > 1 else IP_BROKER_DEFAULT
-    puerto = int(sys.argv[2]) if len(sys.argv) > 2 else PUERTO_BROKER_DEFAULT
+    parser = argparse.ArgumentParser(description="Despachador Básico de Emergencias (Comodoro Rivadavia)")
+    parser.add_argument("pos_broker", nargs="?", default=None, help="IP o host del broker (posicional)")
+    parser.add_argument("pos_puerto", nargs="?", type=int, default=None, help="Puerto del broker (posicional)")
+    parser.add_argument("--broker", type=str, default=None, help="IP del broker MQTT")
+    parser.add_argument("--puerto", type=int, default=None, help="Puerto del broker MQTT (8883 para TLS, 1883 estándar)")
+    parser.add_argument("--id", type=str, default=USUARIO_DEFAULT, help="Client ID del despachador")
+    parser.add_argument("--usuario", type=str, default=USUARIO_DEFAULT, help="Usuario MQTT")
+    parser.add_argument("--password", type=str, default=PASSWORD_DEFAULT, help="Contraseña MQTT")
+    parser.add_argument("--ca-certs", type=str, default=CA_CERTS_DEFAULT, help="Ruta al archivo CA para TLS")
+    parser.add_argument("--no-tls", action="store_true", help="Desactivar TLS y conectar en texto plano (puerto 1883)")
 
-    app = DespachadorBasico(ip_broker=broker, puerto=puerto)
+    args = parser.parse_args()
+
+    broker = args.broker or args.pos_broker or IP_BROKER_DEFAULT
+    if args.no_tls:
+        puerto = args.puerto or args.pos_puerto or 1883
+        ca_certs = None
+    else:
+        puerto = args.puerto or args.pos_puerto or PUERTO_BROKER_DEFAULT
+        ca_certs = args.ca_certs
+
+    app = DespachadorBasico(
+        ip_broker=broker,
+        puerto=puerto,
+        client_id=args.id,
+        usuario=args.usuario,
+        password=args.password,
+        ca_certs=ca_certs,
+    )
     app.iniciar()

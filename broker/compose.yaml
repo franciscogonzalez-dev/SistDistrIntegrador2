@@ -13,6 +13,11 @@ services:
       # Credenciales iniciales del panel (cumple con no dejar admin/public)
       - EMQX_DASHBOARD__DEFAULT_USERNAME=admin_sistdistr
       - EMQX_DASHBOARD__DEFAULT_PASSWORD=SistDistr2026!
+
+      # Certificados TLS para el listener SSL en el puerto 8883
+      - EMQX_LISTENERS__SSL__DEFAULT__SSL_OPTIONS__CACERTFILE=/opt/emqx/certs/ca.crt
+      - EMQX_LISTENERS__SSL__DEFAULT__SSL_OPTIONS__CERTFILE=/opt/emqx/certs/server.crt
+      - EMQX_LISTENERS__SSL__DEFAULT__SSL_OPTIONS__KEYFILE=/opt/emqx/certs/server.key
     volumes:
       - emqx_data:/opt/emqx/data
       - emqx_log:/opt/emqx/log
