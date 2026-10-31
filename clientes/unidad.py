@@ -28,12 +28,18 @@ import time
 import argparse
 from pathlib import Path
 
+# Asegurar que la raíz del proyecto esté en el path para importar 'comun'
+ROOT_DIR = Path(__file__).resolve().parent.parent
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
+
 from comun.publisher import MQTTPub
 from comun import topics, payloads
 
 IP_BROKER_DEFAULT = "127.0.0.1"
-PUERTO_BROKER_DEFAULT = 1883
+PUERTO_BROKER_DEFAULT = 8883
 PASSWORD_DEFAULT = "clave_unidad"
+CA_CERTS_DEFAULT = str(ROOT_DIR / "broker" / "certs" / "ca.crt")
 
 VELOCIDAD_PATRULLA_MS = 10.0   # 10 metros/segundo = 36 km/h para patrulleros
 INTERVALO_REPORTE_SEG = 1.0    # 1 publicación cada 1 segundo
@@ -50,12 +56,13 @@ def cargar_coordenadas(id_unidad, tipo=None):
         else:
             tipo = "ambulancia"
 
+    base_rutas = Path(__file__).resolve().parent / "rutas"
     if tipo == "ambulancia":
-        archivo = "clientes/rutas/ambulancias.json"
+        archivo = base_rutas / "ambulancias.json"
     elif tipo == "bomberos":
-        archivo = "clientes/rutas/bomberos.json"
+        archivo = base_rutas / "bomberos.json"
     else:
-        archivo = "clientes/rutas/policias.json"
+        archivo = base_rutas / "policias.json"
 
     with open(archivo, "r", encoding="utf-8") as f:
         datos = json.load(f)
@@ -122,10 +129,8 @@ class Unidad(MQTTPub):
         puerto=PUERTO_BROKER_DEFAULT,
         usuario=None,
         password=PASSWORD_DEFAULT,
+        ca_certs=CA_CERTS_DEFAULT,
     ):
-        self.topic_posicion = topics.posicion(self.tipo, self.id_unidad)
-        self.topic_presencia = topics.presencia(self.tipo, self.id_unidad)
-
         self.id_unidad = id_unidad
         self.ip_broker = ip_broker
         self.puerto = puerto
@@ -133,6 +138,14 @@ class Unidad(MQTTPub):
 
         # Cargar coordenadas y deducir tipo oficial
         coords, self.tipo = cargar_coordenadas(id_unidad, tipo)
+
+        self.topic_posicion = topics.posicion(self.tipo, self.id_unidad)
+        self.topic_presencia = topics.presencia(self.tipo, self.id_unidad)
+
+        # Si el puerto es seguro o se configuró ca_certs, verificar que el certificado exista
+        ca_file = None
+        if ca_certs and Path(ca_certs).exists():
+            ca_file = str(ca_certs)
 
         # Inicializar la clase padre MQTTPub (sin sesión persistente para unidades)
         super().__init__(
@@ -142,7 +155,8 @@ class Unidad(MQTTPub):
             usuario=usuario_mqtt,
             password=password,
             sesion_persistente=False,
-        )l
+            ca_certs=ca_file,
+        )
 
         # Configurar Last Will and Testament (LWT) antes de conectar
         self.configurar_last_will(
@@ -256,20 +270,30 @@ if __name__ == "__main__":
     parser.add_argument("--id", type=str, default=None, help="ID de la unidad (ej: amb-01, pol-02, bom-03)")
     parser.add_argument("--tipo", type=str, default=None, choices=["ambulancia", "policia", "bomberos"], help="Tipo opcional (se deduce del ID si no se pasa)")
     parser.add_argument("--broker", type=str, default=IP_BROKER_DEFAULT, help="IP del broker MQTT")
-    parser.add_argument("--puerto", type=int, default=PUERTO_BROKER_DEFAULT, help="Puerto del broker MQTT")
+    parser.add_argument("--puerto", type=int, default=None, help="Puerto del broker MQTT (8883 para TLS, 1883 estándar)")
     parser.add_argument("--usuario", type=str, default=None, help="Usuario MQTT")
     parser.add_argument("--password", type=str, default=PASSWORD_DEFAULT, help="Contraseña MQTT")
+    parser.add_argument("--ca-certs", type=str, default=CA_CERTS_DEFAULT, help="Ruta al archivo CA para TLS")
+    parser.add_argument("--no-tls", action="store_true", help="Desactivar TLS y conectar en texto plano (puerto 1883)")
 
     args = parser.parse_args()
     id_final = args.id if args.id else (args.pos_id if args.pos_id else "amb-01")
+
+    if args.no_tls:
+        puerto_final = args.puerto if args.puerto is not None else 1883
+        ca_certs_final = None
+    else:
+        puerto_final = args.puerto if args.puerto is not None else PUERTO_BROKER_DEFAULT
+        ca_certs_final = args.ca_certs
 
     movil = Unidad(
         id_unidad=id_final,
         tipo=args.tipo,
         ip_broker=args.broker,
-        puerto=args.puerto,
+        puerto=puerto_final,
         usuario=args.usuario,
         password=args.password,
+        ca_certs=ca_certs_final,
     )
 
     movil.iniciar()
