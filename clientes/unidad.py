@@ -12,6 +12,13 @@ EJEMPLOS DE EJECUCIÓN:
   python clientes/unidad.py --id pol-01
   python clientes/unidad.py --id bom-02
   python clientes/unidad.py pol-03
+
+Dentro de flota-demo.py estan simuladas las unidades del 1..5 (Ambulancias, Bomberos, Policias)
+Para poder ejecutar  mas unidadesen caso de pruebas se agregaron unidades del 6 y 7
+    python clientes/unidad.py --id amb-06
+    python clientes/unidad.py --id pol-07
+    python clientes/unidad.py --id bom-06
+
 """
 
 import sys
@@ -242,7 +249,6 @@ class Unidad(MQTTPub):
         )
         self.stop()
         print(f"[{self.id_unidad}] Desconectado y detenido.")
-
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Simulador de Unidad Móvil de Emergencia (Comodoro Rivadavia)")

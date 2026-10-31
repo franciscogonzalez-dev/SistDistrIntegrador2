@@ -9,7 +9,7 @@ unidades = [
 ]
 
 procesos = []
-UBICACION_UNIDAD = "clientes/unidad.py"
+UBICACION_UNIDAD = "unidad.py"
 
 print("[*] Iniciando las 15 unidades de la flota en segundo plano...")
 
