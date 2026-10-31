@@ -34,7 +34,15 @@ BASES_AMBULANCIAS = {
     "amb-05": {
         "nombre": "Hospital Militar Regional (Km 8, Italo Dell'Oro 850)",
         "coordenadas": [[-45.7960, -67.4286]]
-    }
+    },
+    "amb-06": {
+        "nombre": "Centro de Salud Zona Norte (Km 5)",
+        "coordenadas": [[-45.8185, -67.4510]]
+    },
+    "amb-07": {
+        "nombre": "Centro de Salud Stella Maris (Zona Sur)",
+        "coordenadas": [[-45.8935, -67.5215]]
+    },
 }
 
 BASES_BOMBEROS = {
@@ -57,7 +65,15 @@ BASES_BOMBEROS = {
     "bom-05": {
         "nombre": "Destacamento 4 Laprida (Jamaica 460)",
         "coordenadas": [[-45.8280, -67.5450]]
-    }
+    },
+    "bom-06": {
+        "nombre": "Destacamento Zona Norte (Km 5)",
+        "coordenadas": [[-45.8230, -67.4560]]
+    },
+    "bom-07": {
+        "nombre": "Destacamento Zona Sur (Stella Maris / Av. Yrigoyen)",
+        "coordenadas": [[-45.8870, -67.5200]]
+    },
 }
 
 ESQUINAS_POLICIAS = {
@@ -113,6 +129,27 @@ ESQUINAS_POLICIAS = {
             (-45.8857, -67.5213),  # [D] Av. Hipólito Yrigoyen 3057
             (-45.8947, -67.5232),  # [D] Barrio Stella Maris
             (-45.8767, -67.5024),  # Cierre
+        ]
+    },
+    "pol-06": {
+        "nombre": "Patrulla Zona Norte (Km 3 a Km 8)",
+        "esquinas": [
+            (-45.8344, -67.4619),  # Hospital Zonal Alvear (Km 3)
+            (-45.8185, -67.4510),  # Km 5
+            (-45.7960, -67.4386),  # Km 8 Malvinas Argentinas
+            (-45.8185, -67.4510),  # Vuelta por Km 5
+            (-45.8344, -67.4619),  # Cierre
+        ]
+    },
+    "pol-07": {
+        "nombre": "Patrulla Zona Oeste (Pueyrredón / Alsina / Yrigoyen)",
+        "esquinas": [
+            (-45.8821, -67.5210),  # Clínica Pueyrredón
+            (-45.8701, -67.5179),  # Av. Estados Unidos 763
+            (-45.8639, -67.4944),  # Clínica del Valle (Av. Alsina)
+            (-45.8659, -67.4844),  # Av. Yrigoyen y Belgrano
+            (-45.8767, -67.5024),  # Av. Yrigoyen 1848
+            (-45.8821, -67.5210),  # Cierre
         ]
     }
 }

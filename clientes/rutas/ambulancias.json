@@ -43,5 +43,23 @@
         -67.4286
       ]
     ]
+  },
+  "amb-06": {
+    "nombre": "Centro de Salud Zona Norte (Km 5)",
+    "coordenadas": [
+      [
+        -45.8185,
+        -67.451
+      ]
+    ]
+  },
+  "amb-07": {
+    "nombre": "Centro de Salud Stella Maris (Zona Sur)",
+    "coordenadas": [
+      [
+        -45.8935,
+        -67.5215
+      ]
+    ]
   }
 }

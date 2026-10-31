@@ -43,5 +43,23 @@
         -67.545
       ]
     ]
+  },
+  "bom-06": {
+    "nombre": "Destacamento Zona Norte (Km 5)",
+    "coordenadas": [
+      [
+        -45.823,
+        -67.456
+      ]
+    ]
+  },
+  "bom-07": {
+    "nombre": "Destacamento Zona Sur (Stella Maris / Av. Yrigoyen)",
+    "coordenadas": [
+      [
+        -45.887,
+        -67.52
+      ]
+    ]
   }
 }

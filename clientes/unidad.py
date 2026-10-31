@@ -1,54 +1,40 @@
 """
-Simulador de Unidad Móvil de Emergencia (Comodoro Rivadavia)
-Proyecto 2 - Sistemas Distribuidos (UNPSJB)
-
 Este módulo implementa el Cliente Móvil (ambulancia, patrullero o bomberos)
 que carga sus datos y coordenadas directamente desde las tablas JSON en 'clientes/rutas/'
 (ambulancias.json, bomberos.json, policias.json) según el ID elegido.
 
-Hereda de MQTTPub (clientes/publisher.py), reutilizando su gestión
+Hereda de MQTTPub (comun/publisher.py), reutilizando su gestión
 de cliente MQTT v5, autenticación, Last Will y publicaciones.
+Utiliza comun.topics y comun.payloads para cumplir con el contrato oficial del proyecto.
 
-EJEMPLOS DE EJECUCIÓN INDIVIDUAL:
-  # Ejecutar una ambulancia (queda estacionada en base fija emitiendo presencia y posición):
+EJEMPLOS DE EJECUCIÓN:
   python clientes/unidad.py --id amb-01
-
-  # Ejecutar un patrullero (inicia patrullaje vial continuo con odómetro a 36 km/h):
   python clientes/unidad.py --id pol-01
-
-  # Ejecutar una autobomba de bomberos:
   python clientes/unidad.py --id bom-02
-
-  # Ejecutar indicando IP y puerto del broker explícitamente:
-  python clientes/unidad.py --id pol-02 --broker 127.0.0.1 --puerto 1883
-
-  # Ejecución corta posicional (sin el flag --id):
   python clientes/unidad.py pol-03
 """
 
-import os
 import sys
 import json
 import math
 import time
 import argparse
-from publisher import MQTTPub
+from pathlib import Path
+
+from comun.publisher import MQTTPub
+from comun import topics, payloads
 
 IP_BROKER_DEFAULT = "127.0.0.1"
 PUERTO_BROKER_DEFAULT = 1883
 PASSWORD_DEFAULT = "clave_unidad"
 
 VELOCIDAD_PATRULLA_MS = 10.0   # 10 metros/segundo = 36 km/h para patrulleros
-INTERVALO_REPORTE_SEG = 1   # 1 publicación cada 1 segundo
-
-# Carpeta donde están las 3 tablas JSON
-CARPETA_RUTAS = "clientes/rutas"
+INTERVALO_REPORTE_SEG = 1.0    # 1 publicación cada 1 segundo
 
 def cargar_coordenadas(id_unidad, tipo=None):
     """
-    Carga las coordenadas desde el JSON correspondiente usando un if/else simple.
+    Carga las coordenadas desde el JSON correspondiente usando el ID de la unidad.
     """
-    # 1. Si no pasaron el tipo, lo deducimos con un if por el ID
     if not tipo:
         if id_unidad.startswith("pol"):
             tipo = "policia"
@@ -57,7 +43,6 @@ def cargar_coordenadas(id_unidad, tipo=None):
         else:
             tipo = "ambulancia"
 
-    # 2. Elegimos el archivo con if/else directo
     if tipo == "ambulancia":
         archivo = "clientes/rutas/ambulancias.json"
     elif tipo == "bomberos":
@@ -65,18 +50,15 @@ def cargar_coordenadas(id_unidad, tipo=None):
     else:
         archivo = "clientes/rutas/policias.json"
 
-    # 3. Leemos el archivo y devolvemos las coordenadas de esa unidad
     with open(archivo, "r", encoding="utf-8") as f:
         datos = json.load(f)
 
     return datos[id_unidad]["coordenadas"], tipo
 
-
 def odometro_simple(ruta, paso_metros=VELOCIDAD_PATRULLA_MS):
     """
-    Odómetro virtual:
-    Convierte las esquinas de la calle en pasos regulares de 'paso_metros' (10m = 36 km/h).
-    Cada elemento resultante equivale exactamente a 1 segundo de viaje.
+    Odómetro virtual: Convierte las esquinas de la calle en pasos regulares de 'paso_metros' (10m = 36 km/h).
+    Cada elemento resultante equivale exactamente a 1 segundo de viaje para el MQTT
     """
     if not ruta or len(ruta) < 2:
         return ruta
@@ -101,7 +83,6 @@ def odometro_simple(ruta, paso_metros=VELOCIDAD_PATRULLA_MS):
             pasos.append((round(lat, 6), round(lon, 6)))
 
     return pasos
-
 
 def calcular_rumbo(coord_ant, coord_act):
     """
@@ -135,17 +116,18 @@ class Unidad(MQTTPub):
         usuario=None,
         password=PASSWORD_DEFAULT,
     ):
+        self.topic_posicion = topics.posicion(self.tipo, self.id_unidad)
+        self.topic_presencia = topics.presencia(self.tipo, self.id_unidad)
+
         self.id_unidad = id_unidad
         self.ip_broker = ip_broker
         self.puerto = puerto
-
-        # 1. Cargar coordenadas desde el JSON con if/else
-        coords, self.tipo = cargar_coordenadas(id_unidad, tipo)
-
-        # Usuario MQTT por defecto coincide con el ID de la unidad
         usuario_mqtt = usuario if usuario else id_unidad
 
-        # 2. Inicializar la clase padre MQTTPub
+        # Cargar coordenadas y deducir tipo oficial
+        coords, self.tipo = cargar_coordenadas(id_unidad, tipo)
+
+        # Inicializar la clase padre MQTTPub (sin sesión persistente para unidades)
         super().__init__(
             ip_broker=self.ip_broker,
             port_broker=self.puerto,
@@ -153,21 +135,17 @@ class Unidad(MQTTPub):
             usuario=usuario_mqtt,
             password=password,
             sesion_persistente=False,
-        )
+        )l
 
-        # 3. Tópicos
-        self.topic_posicion = f"reportes/{self.tipo}/{self.id_unidad}/posicion"
-        self.topic_presencia = f"reportes/{self.tipo}/{self.id_unidad}/presencia"
-
-        # 4. Configurar Last Will and Testament (LWT) antes de conectar
+        # Configurar Last Will and Testament (LWT) antes de conectar
         self.configurar_last_will(
             topic=self.topic_presencia,
-            payload={"id_unidad": self.id_unidad, "estado": "offline"},
+            payload=payloads.presencia("offline"),
             qos=1,
             retain=True,
         )
 
-        # 5. Distinguir si es móvil con patrullaje o base fija
+        # Distinguir si es móvil con patrullaje o base fija
         if len(coords) > 1:
             # Patrullero con circuito vial: aplica odómetro para moverse a 36 km/h
             self.ruta_pasos = odometro_simple(coords, paso_metros=VELOCIDAD_PATRULLA_MS)
@@ -184,20 +162,17 @@ class Unidad(MQTTPub):
 
     def siguiente_paso(self):
         """
-        Retorna la telemetría del segundo actual:
-        - Si es estático (base): emite velocidad 0 y rumbo 0 en sus coordenadas fijas.
+        Retorna la telemetría validado según comun.payloads.POSICION:
+        - Si es estático (base): emite rumbo 0.0 en sus coordenadas fijas.
         - Si es patrulla: avanza 1 paso en la lista y calcula el rumbo del móvil.
         """
         if self.es_estatico:
             pos_actual = self.ruta_pasos[0]
-            return {
-                "v": 1,
-                "ts": int(time.time()),
-                "lat": pos_actual[0],
-                "lon": pos_actual[1],
-                "rumbo": 0.0,
-                "velocidad_kmh": 0.0,
-            }
+            return payloads.posicion(
+                lat=pos_actual[0],
+                lon=pos_actual[1],
+                rumbo=0.0,
+            )
 
         # Móvil en patrullaje continuo
         pos_actual = self.ruta_pasos[self.indice]
@@ -206,14 +181,11 @@ class Unidad(MQTTPub):
         rumbo = calcular_rumbo(self.pos_anterior, pos_actual) if pos_actual != self.pos_anterior else 0.0
         self.pos_anterior = pos_actual
 
-        return {
-            "v": 1,
-            "ts": int(time.time()),
-            "lat": pos_actual[0],
-            "lon": pos_actual[1],
-            "rumbo": rumbo,
-            "velocidad_kmh": round(VELOCIDAD_PATRULLA_MS * 3.6, 1),
-        }
+        return payloads.posicion(
+            lat=pos_actual[0],
+            lon=pos_actual[1],
+            rumbo=rumbo,
+        )
 
     def iniciar(self):
         """
@@ -225,9 +197,9 @@ class Unidad(MQTTPub):
             print(f"[{self.id_unidad}] Error: No se pudo conectar al broker MQTT en {self.ip_broker}:{self.puerto}")
             return
 
-        # Publicar presencia online inmediata (QoS 1, Retained)
+        # Publicar presencia online inmediata (QoS 1, Retained) según contrato
         self.publish(
-            {"id_unidad": self.id_unidad, "estado": "online"},
+            payloads.presencia("online"),
             self.topic_presencia,
             qos=1,
             retain=True,
@@ -240,13 +212,15 @@ class Unidad(MQTTPub):
 
                 telemetria = self.siguiente_paso()
 
-                # Publicar telemetría oficial (QoS 0)
+                # Publicar telemetría oficial (QoS 0) ============================
+                # Agregado del QOS=0 y parametros importantes
                 self.publish(telemetria, self.topic_posicion, qos=0, retain=False)
 
+                rumbo_str = f"{telemetria['rumbo']:.1f}°" if telemetria.get("rumbo") is not None else "N/A"
                 print(
                     f"[{self.id_unidad}] Lat={telemetria['lat']:<10} | "
-                    f"Lon={telemetria['lon']:<10} | Rumbo={telemetria['rumbo']:>5.1f}° | "
-                    f"Vel={telemetria['velocidad_kmh']} km/h"
+                    f"Lon={telemetria['lon']:<10} | Rumbo={rumbo_str:>6} | "
+                    f"Topic={self.topic_posicion}"
                 )
 
                 tiempo_usado = time.time() - inicio_ciclo
@@ -261,7 +235,7 @@ class Unidad(MQTTPub):
         Avisa desconexión limpia ('offline') y detiene el cliente MQTT.
         """
         self.publish(
-            {"id_unidad": self.id_unidad, "estado": "offline"},
+            payloads.presencia("offline"),
             self.topic_presencia,
             qos=1,
             retain=True,
@@ -270,13 +244,8 @@ class Unidad(MQTTPub):
         print(f"[{self.id_unidad}] Desconectado y detenido.")
 
 
-# ==============================================================================
-# ENTRADA DE LÍNEA DE COMANDOS
-# ==============================================================================
-
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Simulador de Unidad Móvil de Emergencia (Comodoro Rivadavia)")
-    # Permite pasar el ID por parámetro posicional ('python unidad.py pol-01') o con '--id pol-01'
     parser.add_argument("pos_id", nargs="?", default=None, help="ID por posición (ej: amb-01, pol-02, bom-03)")
     parser.add_argument("--id", type=str, default=None, help="ID de la unidad (ej: amb-01, pol-02, bom-03)")
     parser.add_argument("--tipo", type=str, default=None, choices=["ambulancia", "policia", "bomberos"], help="Tipo opcional (se deduce del ID si no se pasa)")
@@ -286,8 +255,6 @@ if __name__ == "__main__":
     parser.add_argument("--password", type=str, default=PASSWORD_DEFAULT, help="Contraseña MQTT")
 
     args = parser.parse_args()
-
-    # Resolver ID final: si se pasó --id tiene prioridad, sino el posicional, sino 'amb-01' por defecto
     id_final = args.id if args.id else (args.pos_id if args.pos_id else "amb-01")
 
     movil = Unidad(
