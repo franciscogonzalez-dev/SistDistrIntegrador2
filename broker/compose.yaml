@@ -19,9 +19,6 @@ services:
       # (issue 5 tarea 1) Listener SSL/TLS seguro en el puerto estándar 8883 (Requerimiento 5 de seguridad)
       - "8883:8883"
 
-      # Puerto WebSockets (utilizado por herramientas web y panel de monitoreo)
-      - "8083:8083"
-
       # Puerto HTTP para la interfaz Web de administración de EMQX
       - "18083:18083"
 
@@ -30,13 +27,28 @@ services:
 
       # (issue5 tarea 3) Clave y usuario del panel cambiados por variables de entorno:
       # Cumple con la directiva de seguridad: no dejar admin/public en producción.
-      # Toma el valor de .env si existe; de lo contrario usa el valor por defecto configurado.
+      # La clave sale del .env (no se sube al repo); si falta, compose no levanta.
+      # Ojo: EMQX la aplica solo en el primer arranque (queda guardada en emqx_data).
       - EMQX_DASHBOARD__DEFAULT_USERNAME=${DASHBOARD_USER:-admin_sistdistr}
-      - EMQX_DASHBOARD__DEFAULT_PASSWORD=${DASHBOARD_PASSWORD:-SistDistr2026!}
+      - EMQX_DASHBOARD__DEFAULT_PASSWORD=${DASHBOARD_PASSWORD:?falta DASHBOARD_PASSWORD en broker/.env (ver .env.example)}
 
       # [tarea 2 issue5] Desactivación interna del listener TCP en texto plano:
       # Impide que el proceso de EMQX levante el listener en 0.0.0.0:1883.
       - EMQX_LISTENERS__TCP__DEFAULT__ENABLE=false
+
+      # Los listeners de WebSocket también se desactivan: ws (8083) es MQTT sin cifrar, y wss (8084)
+      # usa el certificado de ejemplo de EMQX, cuya clave privada es pública. Solo queda el ssl en 8883.
+      - EMQX_LISTENERS__WS__DEFAULT__ENABLE=false
+      - EMQX_LISTENERS__WSS__DEFAULT__ENABLE=false
+
+      # No encolar mensajes QoS 0 para las sesiones persistentes desconectadas (servicio y despachador).
+      # Por defecto EMQX si los encola: con el servicio caido, las posiciones (QoS 0, 15 por segundo)
+      # llenarian la cola (max_mqueue_len = 1000) y EMQX descartaria pedidos y comandos. Ver docs/topics.md.
+      - EMQX_MQTT__MQUEUE_STORE_QOS0=false
+
+      # Mensajes retained en disco (por defecto EMQX los guarda en memoria y se pierden si el broker se reinicia).
+      # Quedan en data/mnesia/<nodo>, dentro del volumen emqx_data: por eso el nombre de nodo es fijo.
+      - EMQX_RETAINER__BACKEND__STORAGE_TYPE=disc
 
       # [tarea 1 issue 5] Configuración del listener SSL 8883 con nuestros propios certificados:
       # Apunta a los archivos montados en el volumen ./certs (no utiliza los certificados de ejemplo de EMQX).
@@ -70,11 +82,20 @@ services:
     ports:
       - "5000:5000"
     environment:
-      # Secreto compartido validado en el header HTTP X-Webhook-Secret
-      - WEBHOOK_SECRET=${WEBHOOK_SECRET:-SistDistrSecret2026!}
+      # Secreto compartido validado en el header HTTP X-Webhook-Secret (sale del .env; si falta, no levanta)
+      - WEBHOOK_SECRET=${WEBHOOK_SECRET:?falta WEBHOOK_SECRET en broker/.env (ver .env.example)}
       - MAX_AVISOS=50
+    volumes:
+      # Avisos recibidos: sobreviven a reiniciar o recrear el container
+      - receptor_datos:/app/datos
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5000/health')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
 
 # [tarea 5 issue5] Declaración de volúmenes persistentes gestionados por Docker
 volumes:
   emqx_data:
   emqx_log:
+  receptor_datos:

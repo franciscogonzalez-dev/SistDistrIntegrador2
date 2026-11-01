@@ -4,17 +4,17 @@ Lo malo que tiene el compartir un usuario entre varios clientes, es que un clien
 ### Diseño de topicos
 
 ENTRADA (sin validar) → lee solo el servicio
-  reportes/{tipo}/{username id}/posicion      unidad {id}                 QoS 0
-  reportes/{tipo}/{username id}/presencia     unidad {id} + Last Will     QoS 1  retained (topico que dice si la unidad esta conectada o no)
-  comandos/{despachador id}/{tipo}/{unidad id} despachador   QoS 1  (id único en el payload, por ej comandos/desp-01/ambulancia/amb-07)
-  pedidos/{clientid}/{tipo}      público                     QoS 1  (id único, lat, lon)
+  * reportes/{tipo}/{username id}/posicion      unidad {id}                 QoS 0
+  * reportes/{tipo}/{username id}/presencia     unidad {id} + Last Will     QoS 1  retained (topico que dice si la unidad esta conectada o no)
+  * comandos/{despachador id}/{tipo}/{unidad id} despachador   QoS 1  (id único en el payload, por ej comandos/desp-01/ambulancia/amb-03)
+  * pedidos/{clientid}/{tipo}      público                     QoS 1  (id único, lat, lon)
 
 SALIDA (oficial) → publica solo el servicio
-  flota/{tipo}/{unidad id}/estado           despachador                 QoS 1  retained
-  emergencias/{tipo}/{emergencia id}           despachador                 QoS 1  retained (vacío al cerrar)
-  alertas/{tipo}                     despachador                 QoS 1
-  respuestas/{despachador id}      un solo usuario             QoS 1
-  servicio/estado                    todos (Last Will del servicio) QoS 1 retained
+  * flota/{tipo}/{unidad id}/estado           despachador                 QoS 1  retained
+  * emergencias/{tipo}/{emergencia id}           despachador                 QoS 1  retained (vacío al cerrar)
+  * alertas/{tipo}                     despachador                 QoS 1
+  * respuestas/{despachador id}      un solo usuario             QoS 1
+  * servicio/estado                    todos (Last Will del servicio) QoS 1 retained
 
 ### Porque importa el orden de los niveles de un topico
 cual seria la diferencia entre `pedidos/{clientid}/{tipo}` (el que usamos) vs `pedidos/{tipo}/{clientid}`
@@ -43,16 +43,16 @@ Son dos controles distintos que trabajan juntos:
 2. **Un topico que incluye el username en su ruta garantiza que solo ese usuario publique en esa ruta**, siempre que la regla lo permita y use `${username}`. El broker reemplaza `${username}` por el usuario autenticado, entonces `desp-01` solo puede publicar en `comandos/desp-01/...` y no en `comandos/desp-02/...`. Ojo: si la regla fuera `comandos/#` (sin `${username}`), el username del topico seria texto comun y cualquier despachador podria poner otro.
 
 ```
-{allow, {username, {re, "^desp-"}}, publish, ["comandos/${username}/#"]}.
-{allow, {username, {re, "^amb-"}},  publish, ["reportes/ambulancia/${username}/#"]}.
+{allow, {username, {re, "^desp-"}}, publish, ["comandos/${username}/+/+"]}.
+{allow, {username, {re, "^amb-"}},  publish, ["reportes/ambulancia/${username}/posicion", "reportes/ambulancia/${username}/presencia"]}.
 {deny, all}.
 
 amb-01  publica en comandos/desp-01/...  → la regla de desp- no se aplica a amb-01, la de amb- no matchea el topico → deny
-desp-01 publica en comandos/desp-02/...  → la regla de desp- se aplica, pero comandos/desp-01/# no matchea → deny
+desp-01 publica en comandos/desp-02/...  → la regla de desp- se aplica, pero comandos/desp-01/+/+ no matchea → deny
 desp-01 publica en comandos/desp-01/...  → permitido
 ```
 
-**Ojo: `${username}` solo existe dentro de las reglas de ACL**, no en los topicos. Los clientes siempre publican en topicos concretos (texto comun), ej `reportes/ambulancia/amb-01/posicion`; es el broker el que, al chequear el permiso, convierte la regla `reportes/ambulancia/${username}/#` en `reportes/ambulancia/amb-01/#` y compara. Poner un username en la ruta de un topico, por si solo, no protege nada: es solo una convencion de nombres. Lo que la vuelve una garantia es que la regla de ACL use `${username}` en esa posicion.
+**Ojo: `${username}` solo existe dentro de las reglas de ACL**, no en los topicos. Los clientes siempre publican en topicos concretos (texto comun), ej `reportes/ambulancia/amb-01/posicion`; es el broker el que, al chequear el permiso, convierte la regla `reportes/ambulancia/${username}/posicion` en `reportes/ambulancia/amb-01/posicion` y compara. Poner un username en la ruta de un topico, por si solo, no protege nada: es solo una convencion de nombres. Lo que la vuelve una garantia es que la regla de ACL use `${username}` en esa posicion.
 * No confundir con los `{id}`, `{tipo}`, `{eid}` del arbol de arriba: esos son marcadores para que lo lea una persona ("aca va el id de la unidad"), y los reemplaza nuestro codigo al armar el topico (`comun/topics.py`).
 * Ejemplo: `flota/{tipo}/{id}/estado` tambien lleva el username de la unidad, pero la regla es `{allow, {username, "servicio"}, publish, ["flota/#"]}` (sin `${username}`). Ahi el username es solo un dato: sirve para tener un retained por unidad y para que el despachador sepa de que unidad es el estado. Que una unidad no pueda publicar su propio estado lo garantiza que no tiene ninguna regla que le permita `flota/`, y cae en el `deny`.
 
@@ -66,7 +66,7 @@ Por que:
     ```
 * Con el usuario en el topico y la ACL atada a `${username}`, cada unidad solo puede publicar como si misma:
     ```
-    {allow, {username, {re, "^amb-"}}, publish, ["reportes/ambulancia/${username}/#"]}.
+    {allow, {username, {re, "^amb-"}}, publish, ["reportes/ambulancia/${username}/posicion", "reportes/ambulancia/${username}/presencia"]}.
 
     amb-01 publica en reportes/ambulancia/amb-01/posicion  → pasa
     amb-01 publica en reportes/policia/pol-03/posicion     → el broker lo rechaza
@@ -98,20 +98,22 @@ Como saca el servicio el usuario si se suscribe con wildcard: cada mensaje llega
 * flota/{tipo}/{unidad id}/estado <- estado oficial de cada unidad, lo publica solo el servicio despues de validar lo que reportan las unidades. Junta la conexion (sale de `presencia`), la disponibilidad libre/ocupada (solo la cambia el despachador) y la ultima posicion valida.
     * Va con retained: un retained por unidad (por eso el `{unidad id}` en el topico), asi el mapa del despachador al conectarse muestra la flota completa sin esperar a que cada unidad vuelva a reportar.
     * El `{unidad id}` aca no es por ACL: la regla del servicio es `flota/#`, y ninguna unidad puede publicar en `flota/` (ver seccion de identidad).
-* alertas/{tipo} <- avisos puntuales para el despachador, ej: "amb-07 se desconecto con la emergencia E42 en curso".
+* alertas/{tipo} <- avisos puntuales para el despachador, ej: "amb-03 se desconecto con la emergencia E42 en curso".
     * Sin retained: es un aviso del momento. El estado que importa ya queda en `flota/` y `emergencias/` (ej: la emergencia vuelve a "sin asignar"), asi que un despachador que se conecta despues no necesita la alerta vieja para saber que hacer.
     * QoS 1 para que no se pierda, y como el despachador tiene sesion persistente, si estaba caido la recibe al volver.
 * emergencias/{tipo}/{eid} <- topico para que el servidor publique las emergencias ya validadas (el eid lo genera el servicio, no se reutiliza el id del pedido, asi un cliente no puede pisar la emergencia de otro). Se utiliza el {eid} ya que el broker guarda un solo mensaje retained por topic: con un topico por emergencia, si el despachador se conecta por primera vez, desde otra PC o con la sesion vencida, recibe al instante todas las emergencias abiertas. Si fuera un solo topico emergencias/{tipo}, cada emergencia nueva pisaria a la anterior.
     * La sesion persistente sola no alcanza: solo guarda lo que llego mientras el cliente ya estaba suscripto, y entrega la historia (creada, asignada, cerrada) en vez del estado actual.
     * No se acumulan mensajes en el broker: al cerrar la emergencia el servicio publica un payload vacio con retained y el broker borra ese retained. Siempre hay un retained por emergencia abierta, nada mas (los topicos en si no ocupan lugar, solo los mensajes retained).
 * respuestas/{despachador} <- despachador manda ordenes y necesita saber si se aplicaron o fueron rechazadas
-  * Ejemplo: desp-01 → comandos/desp-01/ambulancia/amb-07   {id: "c-123", accion: "asignar", eid: "E42"}
-servicio: amb-07 está ocupada → rechaza
-servicio → respuestas/desp-01                  {id: "c-123", ok: false, motivo: "amb-07 ocupada"}
+  * Ejemplo: desp-01 → comandos/desp-01/ambulancia/amb-03   {id: "c-123", accion: "asignar", eid: "E42"}
+servicio: amb-03 está ocupada → rechaza
+servicio → respuestas/desp-01                  {id: "c-123", ok: false, motivo: "amb-03 ocupada"}
 * servicio/estado <- dice si el servicio central esta vivo. Funciona igual que la presencia de las unidades: el servicio registra un Last Will `offline` (QoS 1, retained) y al conectarse publica `online` (retained).
     * Lo leen todos. Al ser retained, el que se conecta sabe al instante si el servicio esta andando.
     * Despachador: si esta caido, sabe que sus comandos no se van a procesar hasta que vuelva (no se pierden: van con QoS 1 y el servicio tiene sesion persistente).
-    * Publico: es lo unico que puede leer. Si el servicio esta caido, la app avisa "el sistema esta con problemas, llama al 107 / 101 / 100", asi la persona no se queda esperando.
+    * Publico: es lo unico que puede leer. Si el servicio esta caido, la app avisa "el sistema esta con problemas: tu pedido se va a procesar cuando vuelva; si es urgente llama al 107 / 101 / 100", asi la persona no se queda esperando.
+        * Los botones **no se bloquean**: un pedido mandado con el servicio caido no se pierde, porque va con QoS 1 y el broker lo guarda en la sesion persistente del servicio hasta que vuelva. Bloquearlos haria que ese pedido se pierda del todo.
+        * Si el que esta caido es el broker, la app ni siquiera se conecta: ese aviso sale del estado de conexion de la propia app, no de `servicio/estado`.
     * Responde la pregunta del req. 3 "¿y cuando se cae el servicio?".
 * El publico/civil no tiene topico de salida propio: no ve ninguna unidad, ni siquiera la asignada. Solo publica su pedido y lee `servicio/estado`.
 
@@ -121,13 +123,14 @@ La tabla completa de usuarios y reglas esta en `docs/acl.md` (issue #2), y tiene
 ### Quien se suscribe y con qué wildcard
 * `+`: reemplaza un nivel, cualquier sea su valor
 * `#`: reemplaza cualquier cant de niveles, solo se puede poner al final
+
 | Topic | Publica | Se suscribe | Patrón de suscripción |
 |-------|---------|-------------|----------------------|
 | `reportes/{tipo}/{unidad}/posicion` | unidad | servicio | `reportes/+/+/posicion` |
 | `reportes/{tipo}/{unidad}/presencia` | unidad + Last Will | servicio | `reportes/+/+/presencia` |
 | `comandos/{despachador}/{tipo}/{unidad}` | despachador | servicio | `comandos/+/+/+` |
 | `pedidos/{clientid}/{tipo}` | público | servicio | `pedidos/+/+` |
-| `flota/{tipo}/{unidad}/estado` | servicio | despachador | `flota/#` |
+| `flota/{tipo}/{unidad}/estado` | servicio | despachador | `flota/#` (con QoS 0, ver Sesión Persistente) |
 | `emergencias/{tipo}/{eid}` | servicio | despachador | `emergencias/#` |
 | `alertas/{tipo}` | servicio | despachador | `alertas/#` |
 | `respuestas/{despachador}` | servicio | ese despachador | `respuestas/desp-01` (sin wildcard) |
@@ -157,28 +160,43 @@ QoS 1 puede entregar un mensaje mas de una vez, entonces el servicio tiene que p
 |---------|-------------------------------|----------------------|
 | `comandos` | mismo `id` de comando ya procesado | No lo vuelve a aplicar. Reenvia la misma respuesta a `respuestas/{despachador}`, por si la primera se perdio. |
 | `pedidos` | mismo `clientid` (del topico) + mismo `id` (del payload) | No crea otra emergencia. Guarda a que `eid` corresponde cada pedido y, si llega repetido, lo ignora. |
-| `posicion` | `ts` menor o igual al ultimo aceptado de esa unidad | La descarta. Cubre duplicados y posiciones que llegan desordenadas. |
+| `posicion` | `ts` menor o igual al ultimo aceptado de esa unidad | La descarta. Cubre duplicados y posiciones que llegan desordenadas. Ademas el `ts` tiene que estar cerca del reloj del servicio (ver abajo). |
 | Mensajes de estado (`presencia`, `flota`, `emergencias`, `servicio/estado`) | — | No hace falta nada: traen el estado completo, recibirlos dos veces deja el mismo resultado. |
 
 * El `id` de comandos y pedidos lo genera el cliente (uuid4), uno por accion. Si el cliente reintenta la misma accion, manda el mismo `id`; si es una accion nueva, uno nuevo.
 * El pedido se identifica por `clientid` + `id` y no solo por `id`, asi un civil no puede pisar el pedido de otro mandando el mismo `id`.
 * Los ids ya procesados y el ultimo `ts` de cada unidad se guardan en SQLite (#11), no solo en memoria: si el servicio se reinicia y el broker le reentrega mensajes de la sesion persistente, los sigue reconociendo como duplicados.
 
+#### El `ts` de la posicion no se toma a ciegas
+El salto imposible se calcula como velocidad: distancia / (`ts` actual - `ts` anterior), maximo 75 m/s. Pero el `ts` lo escribe la unidad, y una unidad tramposa podria saltar 10 km y poner un `ts` 200 s mas adelante: la velocidad da 50 m/s y pasaria. Por eso el servicio (#9):
+* Descarta la posicion si su `ts` se aleja mas de `TOLERANCIA_TS` (10 s) de la hora del servicio al recibirla. Asi el `ts` sigue sirviendo para ordenar y calcular la velocidad, pero el tramposo solo puede estirarlo unos segundos: como mucho un salto de unos 750 m (75 m/s x 10 s), en vez de cualquier distancia.
+* Requiere que los relojes de las notebooks esten sincronizados. Se usa 10 s y no menos porque Windows sincroniza el reloj (NTP) una vez por semana y puede desfasarse unos segundos; antes de la demo conviene correr `w32tm /resync` en las notebooks con Windows.
+* No usa solo la hora de recepcion para la velocidad: dos posiciones pueden llegar juntas por la red (por ejemplo, despues de un microcorte) y daria una velocidad enorme sin que la unidad haya hecho trampa.
+* `NaN` e `Infinity` se rechazan al validar el payload (`json.loads` los acepta, pero un `ts` `NaN` rompe la comparacion con el ultimo `ts`).
+
 ### Sesión Persistente
 La sesión persistente guarda las suscripciones del cliente y los mensajes que le llegan mientras está desconectado. Por eso solo le sirve a un cliente que recibe mensajes que no se pueden perder.
 
-Para que funcione hay que cumplir cuatro condiciones:
+Para que funcione hay que cumplir cinco condiciones:
 
 1. Client ID fijo (servicio, desp-01). La sesión está atada al client ID: si cambia, el broker crea una sesión nueva.
-2. clean_start=False y un session_expiry_interval distinto de 0 al conectar, porque es MQTT 5. Por ejemplo, un día para el servicio y una hora para el despachador.
-3. Suscribirse con QoS 1. El broker entrega cada mensaje con el menor QoS entre el de la publicación y el de la suscripción. Si el servicio se suscribe a comandos/+/+/+ con QoS 0, los comandos le llegan como QoS 0 y no se guardan mientras está caído. Es un error fácil de cometer.
-4. La cola tiene límite. EMQX guarda hasta max_mqueue_len mensajes por sesión (1000 por defecto). Para la demo alcanza, pero conviene mencionarlo en el informe.
+2. clean_start=False y un session_expiry_interval distinto de 0 al conectar, porque es MQTT 5. Usamos **24 h para el servicio y 1 h para el despachador** (parámetro `expiracion_sesion` de `MQTTPub`):
+    * Servicio, 24 h: lo que le guarda la sesión son pedidos y comandos, que no se pueden perder. Cubre un reinicio del container y también que el servidor quede apagado una noche. Si vence, el estado igual se recupera por retained, pero se pierden los pedidos que llegaron mientras tanto.
+    * Despachador, 1 h: lo que le guarda la sesión son alertas y respuestas, que pierden sentido rápido (el estado actual le llega por retained de `flota/` y `emergencias/`). Cubre cerrar y abrir la app o un corte de red; si vuelve al otro día, no recibe una tanda de alertas viejas.
+3. Suscribirse con QoS 1 a lo que no se puede perder. El broker entrega cada mensaje con el menor QoS entre el de la publicación y el de la suscripción. Si el servicio se suscribe a comandos/+/+/+ con QoS 0, los comandos le llegan como QoS 0 y no se guardan mientras está caído. Es un error fácil de cometer.
+4. La cola tiene límite. EMQX guarda hasta max_mqueue_len mensajes por sesión (1000 por defecto) y, cuando se llena, descarta los más viejos.
+5. Que la cola no se llene de mensajes que no importan. Por defecto EMQX **también encola QoS 0** para las sesiones desconectadas (`mqtt.mqueue_store_qos0 = true`). Con 15 unidades reportando cada segundo, en un minuto de servicio caído la cola se llena de posiciones viejas y empieza a descartar pedidos y comandos. Por eso:
+    * En el compose del broker va `EMQX_MQTT__MQUEUE_STORE_QOS0=false` (#5): las posiciones (QoS 0) no se guardan, y al volver el servicio recibe solo las nuevas.
+    * El despachador se suscribe a `flota/#` con **QoS 0**: `flota/.../estado` se publica con cada posicion aceptada, y con QoS 1 llenaría su cola igual que las posiciones. No pierde nada, porque es retained: al reconectar recibe el último estado de cada unidad.
+    * Sin las posiciones, en la cola del servicio quedan pedidos, comandos y cambios de presencia: aunque esté caído horas son decenas de mensajes, así que 1000 alcanza y no se agranda. Solo se llenaría con un ataque (miles de pedidos), y para eso agrandar la cola no es la solución.
+
+**Fuera del alcance:** que pasa con los pedidos acumulados si el servicio estuvo caido mucho tiempo (por ejemplo 8 h). Al volver los procesa como cualquier pedido y crea las emergencias; no se marcan como demoradas ni se descartan por viejas.
 
 
 | Cliente | ¿Sesión persistente? | Por qué |
 |---------|----------------------|---------|
-| Servicio | Sí | Si se cae, el broker le guarda los comandos, pedidos y cambios de presencia (QoS 1) que lleguen mientras tanto, y se los entrega al volver. Las posiciones son QoS 0 y no se guardan, pero no hace falta. |
-| Despachador | Sí | Al volver recibe las alertas y respuestas que se perdió. Las emergencias y la flota igual le llegan por retained. |
+| Servicio | Sí (24 h) | Si se cae, el broker le guarda los comandos, pedidos y cambios de presencia (QoS 1) que lleguen mientras tanto, y se los entrega al volver. Las posiciones son QoS 0 y no se guardan (con `mqueue_store_qos0=false`, condición 5), pero no hace falta. |
+| Despachador | Sí (1 h) | Al volver recibe las alertas y respuestas que se perdió. Las emergencias y la flota igual le llegan por retained (`flota/#` suscripto con QoS 0, condición 5). |
 | Unidades | No | No se suscriben a nada, solo publican. Si se cortan, los mensajes que no salieron quedan en la cola local de paho (la que ya maneja `publisher.py`), no en el broker. |
 | Público | No | Solo lee `servicio/estado`, que es retained y le llega al conectarse. |
 | Receptor | No aplica | No es un cliente MQTT. |
@@ -193,7 +211,7 @@ Casos del servicio:
 2. **Arranca sin sesion**: solo el retained le dice que unidades estan conectadas y el estado de cada cosa. Pasa cuando:
     * Es el primer arranque: las unidades se conectaron antes de que el servicio se suscribiera nunca, asi que el broker no tenia donde guardarle nada.
     * La sesion vencio: estuvo caido mas que el `session_expiry_interval`.
-    * Se recreo el broker (`docker rm`, como en las pruebas de #21): las sesiones viven en el broker y se pierden.
+    * Se reinicio o se recreo el broker (`docker rm`, como en las pruebas de #21): las sesiones viven en la memoria del broker y se pierden. Los retained no: se guardan en disco (`EMQX_RETAINER__BACKEND__STORAGE_TYPE=disc`, dentro del volumen `emqx_data`), asi que al volver el servicio y el despachador recuperan el estado.
 
 Al reconectar con la sesion viva, si el cliente vuelve a suscribirse (paho lo hace en `on_connect`, lo pide #3), el broker ademas le manda el retained de cada topico. Puede recibir un mismo estado dos veces (por la cola y por el retained), pero no hace daño porque los mensajes de estado son idempotentes. Si se quiere evitar, MQTT 5 tiene la opcion **Retain Handling** al suscribirse: `1` = solo manda el retained si la suscripcion es nueva.
 
@@ -213,26 +231,27 @@ Por qué esos dos clientes:
 
 
 Dos detalles de MQTT 5 que les conviene saber:
-* El Last Will solo sale si la desconexión es inesperada. Si la unidad se apaga bien (disconnect()), tiene que publicar offline ella misma antes de cerrar. La otra opción es desconectarse con el reason code 0x04 ("Disconnect with Will Message"), que le pide al broker que publique el Last Will igual.
-* Will Delay Interval: se puede configurar un retraso de unos segundos antes de que el broker publique el Last Will. Si la unidad reconecta dentro de ese tiempo, el "offline" no se publica, y así un microcorte no genera una alerta ni desasigna la emergencia. Para su caso, unos 5–10 segundos estaría bien
+* El Last Will solo sale si la desconexión es inesperada. Si la unidad se apaga bien (disconnect()), tiene que publicar offline ella misma antes de cerrar. La otra opción es desconectarse con el reason code 0x04 ("Disconnect with Will Message"), que le pide al broker que publique el Last Will igual. Usamos esta: `MQTTPub.stop(con_last_will=True)`, así el "offline" de un cierre limpio es el mismo mensaje que el de una caída.
+* Will Delay Interval: MQTT 5 permite que el broker espere unos segundos antes de publicar el Last Will, para que un microcorte no genere una alerta ni desasigne la emergencia. **No lo usamos**: el broker publica el Last Will cuando vence el Will Delay o cuando termina la sesión, lo que pase primero, y las unidades no tienen sesión persistente (expira apenas se desconectan), así que el "offline" saldría en el acto igual. Para que sirviera habría que darles una sesión de unos segundos. Lo dejamos así porque las unidades son simuladas y un microcorte es poco probable; el costo es que si la conexión de una unidad ocupada se corta y vuelve enseguida, igual se desasigna.
 
 
 ### Payloads
 * v en todos. Arranca en 1.
 * ts en segundos Unix, como en el ejemplo de la duda 13 (1730000000).
 * Un campo obligatorio que falta o tiene tipo incorrecto hace que se descarte el mensaje.
+* Los números tienen que ser finitos (`NaN` e `Infinity` se rechazan), `lat` entre -90 y 90, `lon` entre -180 y 180 y `rumbo` entre 0 y 360 (sin incluir 360). Que la posición caiga dentro de Comodoro lo valida el servicio, no el payload.
 * Los campos desconocidos se ignoran.
-* Los id son uuid4 en texto.
+* Los `id` de comandos y pedidos son uuid4 en texto (los genera el cliente). El `eid` lo genera el servicio (#12) y es un identificador corto para mostrar en el mapa (en los ejemplos, `E42`).
 * La identidad de quien publica sale del topic, nunca del payload.
 
 | Topico | Publica | Obligatorios | Opcionales | Ejemplo | Notas |
 |--------|---------|--------------|------------|---------|-------|
-| `reportes/{tipo}/{unidad}/posicion` | unidad | `v, ts, lat, lon` | `rumbo` (0–359) | `{"v":1,"ts":1730000000,"lat":-45.8641,"lon":-67.4966,"rumbo":180}` | Tipo y unidad salen del topico |
+| `reportes/{tipo}/{unidad}/posicion` | unidad | `v, ts, lat, lon` | `rumbo` (0 ≤ rumbo < 360) | `{"v":1,"ts":1730000000,"lat":-45.8641,"lon":-67.4966,"rumbo":180}` | Tipo y unidad salen del topico |
 | `reportes/{tipo}/{unidad}/presencia` | unidad + Last Will | `v, estado` (`online`/`offline`) | `ts` | `{"v":1,"estado":"offline"}` | `ts` opcional: el Last Will se define al conectar, tendria la hora de conexion y no la de la caida |
 | `comandos/{despachador}/{tipo}/{unidad}` | despachador | `v, id, ts, accion` (`asignar`/`liberar`) | `eid` (obligatorio si `asignar`) | `{"v":1,"id":"3f2a…","ts":1730000000,"accion":"asignar","eid":"E42"}` | `liberar` deja la unidad libre y cierra su emergencia |
 | `pedidos/{clientid}/{tipo}` | publico | `v, id, ts, lat, lon` | — | `{"v":1,"id":"b7e4…","ts":1730000000,"lat":-45.8712,"lon":-67.5023}` | Repetido (mismo `clientid` + `id`) no crea otra emergencia |
 | `flota/{tipo}/{unidad}/estado` | servicio | `v, ts, conexion` (`online`/`offline`), `disponibilidad` (`libre`/`ocupada`) | `lat, lon, rumbo`, `eid` (si ocupada) | `{"v":1,"ts":1730000000,"conexion":"online","disponibilidad":"ocupada","lat":-45.8641,"lon":-67.4966,"eid":"E42"}` | `lat`/`lon` opcionales: sin posicion valida todavia no aparece en el mapa |
-| `emergencias/{tipo}/{eid}` | servicio | `v, eid, ts, lat, lon, estado` (`sin_asignar`/`asignada`) | `unidad` (si asignada) | `{"v":1,"eid":"E42","ts":1730000000,"lat":-45.8712,"lon":-67.5023,"estado":"asignada","unidad":"amb-07"}` | Al cerrar: payload vacio (no JSON) + retained. No lleva el `clientid` del civil |
-| `alertas/{tipo}` | servicio | `v, ts, motivo` (`unidad_desconectada`/`posicion_invalida`), `mensaje` | `unidad, eid` | `{"v":1,"ts":1730000000,"motivo":"unidad_desconectada","mensaje":"amb-07 se desconecto con E42 en curso","unidad":"amb-07","eid":"E42"}` | `motivo` lo usa el codigo, `mensaje` se muestra al despachador |
-| `respuestas/{despachador}` | servicio | `v, id, ts, ok` | `motivo` (si `ok` es false) | `{"v":1,"id":"3f2a…","ts":1730000001,"ok":false,"motivo":"amb-07 ocupada"}` | `id` = el del comando que responde |
+| `emergencias/{tipo}/{eid}` | servicio | `v, eid, ts, lat, lon, estado` (`sin_asignar`/`asignada`) | `unidad` (si asignada) | `{"v":1,"eid":"E42","ts":1730000000,"lat":-45.8712,"lon":-67.5023,"estado":"asignada","unidad":"amb-03"}` | Al cerrar: payload vacio (no JSON) + retained. No lleva el `clientid` del civil |
+| `alertas/{tipo}` | servicio | `v, ts, motivo` (`unidad_desconectada`/`posicion_invalida`), `mensaje` | `unidad, eid` | `{"v":1,"ts":1730000000,"motivo":"unidad_desconectada","mensaje":"amb-03 se desconecto con E42 en curso","unidad":"amb-03","eid":"E42"}` | `motivo` lo usa el codigo, `mensaje` se muestra al despachador |
+| `respuestas/{despachador}` | servicio | `v, id, ts, ok` | `motivo` (si `ok` es false) | `{"v":1,"id":"3f2a…","ts":1730000001,"ok":false,"motivo":"amb-03 ocupada"}` | `id` = el del comando que responde |
 | `servicio/estado` | servicio + Last Will | `v, estado` (`online`/`offline`) | `ts` | `{"v":1,"estado":"online","ts":1730000000}` | `ts` opcional por lo mismo que `presencia` |

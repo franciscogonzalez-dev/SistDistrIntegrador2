@@ -1,5 +1,5 @@
 """
-VIBECODEADO - Para generar las rutas con .json con OSRM a nuestro gusto.
+Genera los JSON de rutas de las unidades, usando OSRM para que los patrulleros sigan las calles.
 
 Este script se ejecuta UNA SOLA VEZ para generar los 3 archivos JSON:
 1. rutas/ambulancias.json -> Bases fijas en hospitales y centros de salud
@@ -11,8 +11,8 @@ import os
 import json
 import requests
 
-# Carpeta de salida donde se guardarán los 3 archivos JSON
-CARPETA_RUTAS = "clientes/rutas"
+# Carpeta de salida donde se guardarán los 3 archivos JSON (la de este script, se corra desde donde se corra)
+CARPETA_RUTAS = os.path.dirname(os.path.abspath(__file__))
 
 BASES_AMBULANCIAS = {
     "amb-01": {
@@ -34,14 +34,6 @@ BASES_AMBULANCIAS = {
     "amb-05": {
         "nombre": "Hospital Militar Regional (Km 8, Italo Dell'Oro 850)",
         "coordenadas": [[-45.7960, -67.4286]]
-    },
-    "amb-06": {
-        "nombre": "Centro de Salud Zona Norte (Km 5)",
-        "coordenadas": [[-45.8185, -67.4510]]
-    },
-    "amb-07": {
-        "nombre": "Centro de Salud Stella Maris (Zona Sur)",
-        "coordenadas": [[-45.8935, -67.5215]]
     },
 }
 
@@ -65,14 +57,6 @@ BASES_BOMBEROS = {
     "bom-05": {
         "nombre": "Destacamento 4 Laprida (Jamaica 460)",
         "coordenadas": [[-45.8280, -67.5450]]
-    },
-    "bom-06": {
-        "nombre": "Destacamento Zona Norte (Km 5)",
-        "coordenadas": [[-45.8230, -67.4560]]
-    },
-    "bom-07": {
-        "nombre": "Destacamento Zona Sur (Stella Maris / Av. Yrigoyen)",
-        "coordenadas": [[-45.8870, -67.5200]]
     },
 }
 
@@ -131,27 +115,6 @@ ESQUINAS_POLICIAS = {
             (-45.8767, -67.5024),  # Cierre
         ]
     },
-    "pol-06": {
-        "nombre": "Patrulla Zona Norte (Km 3 a Km 8)",
-        "esquinas": [
-            (-45.8344, -67.4619),  # Hospital Zonal Alvear (Km 3)
-            (-45.8185, -67.4510),  # Km 5
-            (-45.7960, -67.4386),  # Km 8 Malvinas Argentinas
-            (-45.8185, -67.4510),  # Vuelta por Km 5
-            (-45.8344, -67.4619),  # Cierre
-        ]
-    },
-    "pol-07": {
-        "nombre": "Patrulla Zona Oeste (Pueyrredón / Alsina / Yrigoyen)",
-        "esquinas": [
-            (-45.8821, -67.5210),  # Clínica Pueyrredón
-            (-45.8701, -67.5179),  # Av. Estados Unidos 763
-            (-45.8639, -67.4944),  # Clínica del Valle (Av. Alsina)
-            (-45.8659, -67.4844),  # Av. Yrigoyen y Belgrano
-            (-45.8767, -67.5024),  # Av. Yrigoyen 1848
-            (-45.8821, -67.5210),  # Cierre
-        ]
-    }
 }
 
 def consultar_osrm(esquinas):
@@ -177,16 +140,16 @@ def main():
     ruta_amb = os.path.join(CARPETA_RUTAS, "ambulancias.json")
     with open(ruta_amb, "w", encoding="utf-8") as f:
         json.dump(BASES_AMBULANCIAS, f, indent=2, ensure_ascii=False)
-    print(f"[OK] Generado: {ruta_amb} (5 bases de ambulancias)")
+    print(f"[OK] Generado: {ruta_amb} ({len(BASES_AMBULANCIAS)} bases de ambulancias)")
 
     # 2. Guardar bomberos.json ======================
     ruta_bom = os.path.join(CARPETA_RUTAS, "bomberos.json")
     with open(ruta_bom, "w", encoding="utf-8") as f:
         json.dump(BASES_BOMBEROS, f, indent=2, ensure_ascii=False)
-    print(f"[OK] Generado: {ruta_bom} (5 cuarteles de bomberos)")
+    print(f"[OK] Generado: {ruta_bom} ({len(BASES_BOMBEROS)} cuarteles de bomberos)")
 
     # 3. Generar y guardar policias.json con OSRM ======================
-    print("[*] Consultando OSRM para las 5 cuadrículas de policía...")
+    print(f"[*] Consultando OSRM para las {len(ESQUINAS_POLICIAS)} cuadrículas de policía...")
     resultado_policias = {}
     for id_pol, info in ESQUINAS_POLICIAS.items():
         print(f"   -> Generando circuito vial para {id_pol} ({info['nombre']})...")
@@ -200,7 +163,7 @@ def main():
     ruta_pol = os.path.join(CARPETA_RUTAS, "policias.json")
     with open(ruta_pol, "w", encoding="utf-8") as f:
         json.dump(resultado_policias, f, indent=2, ensure_ascii=False)
-    print(f"[OK] Generado: {ruta_pol} (5 cuadrículas policiales)")
+    print(f"[OK] Generado: {ruta_pol} ({len(resultado_policias)} cuadrículas policiales)")
 
     print("\n[LISTO] Los 3 archivos JSON están listos en la carpeta 'rutas/'.")
 

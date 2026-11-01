@@ -15,16 +15,18 @@ SistDistrIntegrador2/
 │   ├── .env.example              # claves de ejemplo; el .env real no se sube (#5, #25)
 │   ├── emqx/                     # configuracion versionada, sobrevive a borrar el container
 │   │   ├── usuarios              # usuarios y claves (las reales fuera del repo) (#6)
-│   │   ├── acl.conf              # reglas por patron de usuario + deny final (#6)
-│   │   └── webhooks/reglas       # webhook directo y regla SQL de emergencia nueva (#17)
+│   │   ├── acl.conf              # reglas por patron de usuario + deny final (#2, #6)
+│   │   └── webhooks/reglas       # webhook directo y regla SQL de emergencia sin asignar (#17)
 │   └── certs/                    # ca.crt y server.crt (las .key no se suben) (#4)
 │
 ├── receptor/                     # servidor HTTP que recibe los webhooks (#7)
 │   ├── Dockerfile
-│   └── app.py                    # endpoints, chequeo del secreto, log y pagina de avisos
+│   ├── requirements.txt
+│   └── app.py                    # endpoints, chequeo del secreto, log y pagina de avisos (los avisos se guardan en el volumen receptor_datos)
 │
 ├── servicio/                     # notebook B (la del servicio)
-│   ├── compose.yaml              # volumen para la base, restart, BROKER_HOST por env (#11)
+│   ├── compose.yaml              # volumen para la base, restart, conexion por env: MQTT_HOST, MQTT_PORT, MQTT_USUARIO, MQTT_PASSWORD, MQTT_CA_CERTS (#11)
+│   ├── .env.example              # MQTT_PASSWORD de ejemplo; el .env real no se sube (#11)
 │   ├── Dockerfile                # contexto de build en la raiz, para copiar comun/ (#11)
 │   ├── src/
 │   │   ├── main.py               # conexion, Last Will en servicio/estado, suscripciones (#8)
@@ -38,9 +40,15 @@ SistDistrIntegrador2/
 │   └── tests/                    # tests de validacion que no necesitan broker (#9)
 │
 ├── clientes/
-│   ├── unidad.py                 # clase Unidad(MQTTPub) y simulador de recorrido (#13)
-│   ├── flota_demo.py             # lanza las 15 unidades de la demo (#13)
-│   └── mapa.py                   # mapa en modo despachador y en modo publico (#14, #15, #16)
+│   ├── unidad.py                 # clase Unidad(MQTTPub) y simulador de recorrido, con modo --invalidas (#13)
+│   ├── flota-demo.py             # lanza las 15 unidades de la demo (#13)
+│   ├── credenciales.py           # lee la clave de cada cliente de credenciales.json (#13, #14)
+│   ├── credenciales.example.json # claves de ejemplo; el credenciales.json real no se sube (#6)
+│   ├── rutas/                    # recorridos y bases de cada unidad (#13)
+│   │   ├── generar_rutas.py      # arma los JSON a partir de esquinas y direcciones
+│   │   └── ambulancias.json, bomberos.json, policias.json
+│   ├── despachador.py            # mapa del despachador (#14, #15)
+│   └── publico.py                # app del publico; falta definir si es otro modo de despachador.py (#16)
 │
 ├── pruebas/                      # scripts de cliente tramposo para la demo (#19)
 │
@@ -65,5 +73,5 @@ SistDistrIntegrador2/
 #### Notas
 * **Handlers por tipo de mensaje, no por tipo de unidad.** La #8 dice "handler por tipo de unidad", pero una ambulancia y un patrullero se procesan igual: lo que cambia es el tipo de mensaje (posicion, presencia, comando, pedido), y cada uno tiene su issue (#9, #10, #12). El tipo de unidad sale del topico y es un dato mas.
 * **El tipo y el id salen solo del topico** (ver `topics.md`, seccion de identidad). El validador no compara el topico contra el payload, porque el payload no lleva id.
-* **Lo que no se sube:** las `.key`, el `.env` con las claves reales y las bases SQLite. Para cada uno hay un ejemplo versionado (`.env.example`) o un script que lo genera (`generar_certs.sh`).
+* **Lo que no se sube:** las `.key`, el `.env` con las claves reales, `clientes/credenciales.json` y las bases SQLite. Para cada uno hay un ejemplo versionado (`.env.example`, `credenciales.example.json`) o un script que lo genera (`generar_certs.sh`).
 * **`comun/` se copia en el container del servicio**, por eso el contexto de build del Dockerfile es la raiz del repo (#11).

@@ -21,9 +21,12 @@ if __name__ == "__main__":
     parser.add_argument("--puerto", type=int, default=None, help="Puerto del broker MQTT (8883 para TLS, 1883 estándar)")
     parser.add_argument("--ca-certs", type=str, default=None, help="Ruta al archivo CA para TLS")
     parser.add_argument("--no-tls", action="store_true", help="Desactivar TLS y conectar en texto plano (puerto 1883)")
+    parser.add_argument("--invalidas", type=int, default=0, metavar="N", help="Cada N reportes cada unidad manda una posición inválida")
+    parser.add_argument("--verbose", action="store_true", help="Imprimir cada reporte de las 15 unidades")
 
     args = parser.parse_args()
 
+    # Las claves las lee cada unidad de clientes/credenciales.json
     cmd_extra = []
     if args.broker:
         cmd_extra.extend(["--broker", args.broker])
@@ -33,6 +36,10 @@ if __name__ == "__main__":
         cmd_extra.extend(["--ca-certs", args.ca_certs])
     if args.no_tls:
         cmd_extra.append("--no-tls")
+    if args.invalidas:
+        cmd_extra.extend(["--invalidas", str(args.invalidas)])
+    if not args.verbose:
+        cmd_extra.append("--silencioso")
 
     procesos = []
 
