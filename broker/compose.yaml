@@ -1,29 +1,67 @@
 services:
+  # ==============================================================================
+  # SERVICIO 1: BROKER MQTT (EMQX)
+  # ==============================================================================
   emqx:
     image: emqx/emqx:5.8.0
     container_name: emqx_broker
+
+    # Política de reinicio automático ante caídas o reinicios del servidor [issue 5]
     restart: unless-stopped
+
     ports:
-      - "1883:1883"    # MQTT TCP estándar (pruebas y desarrollo)
-      - "8083:8083"    # MQTT WebSockets (necesario para el cliente web del Dashboard)
-      - "8883:8883"    # MQTT SSL/TLS seguro (requerimiento de la consigna)
-      - "18083:18083"  # Dashboard Web de administración de EMQX
+      # Listener TCP 1883 desactivado (issue 5):
+      # Se comenta el mapeo de puertos hacia el host para impedir conexiones sin cifrar.
+      # Para la prueba comparativa de captura de tráfico (Wireshark / tcpdump sin TLS)
+      # se descomenta únicamente de forma temporal en un entorno controlado:
+      # - "1883:1883"
+
+      # (issue 5 tarea 1) Listener SSL/TLS seguro en el puerto estándar 8883 (Requerimiento 5 de seguridad)
+      - "8883:8883"
+
+      # Puerto WebSockets (utilizado por herramientas web y panel de monitoreo)
+      - "8083:8083"
+
+      # Puerto HTTP para la interfaz Web de administración de EMQX
+      - "18083:18083"
+
     environment:
       - EMQX_NODE__NAME=emqx@127.0.0.1
-      # Credenciales iniciales del panel (cumple con no dejar admin/public)
-      - EMQX_DASHBOARD__DEFAULT_USERNAME=admin_sistdistr
-      - EMQX_DASHBOARD__DEFAULT_PASSWORD=SistDistr2026!
 
-      # Certificados TLS para el listener SSL en el puerto 8883
+      # (issue5 tarea 3) Clave y usuario del panel cambiados por variables de entorno:
+      # Cumple con la directiva de seguridad: no dejar admin/public en producción.
+      # Toma el valor de .env si existe; de lo contrario usa el valor por defecto configurado.
+      - EMQX_DASHBOARD__DEFAULT_USERNAME=${DASHBOARD_USER:-admin_sistdistr}
+      - EMQX_DASHBOARD__DEFAULT_PASSWORD=${DASHBOARD_PASSWORD:-SistDistr2026!}
+
+      # [tarea 2 issue5] Desactivación interna del listener TCP en texto plano:
+      # Impide que el proceso de EMQX levante el listener en 0.0.0.0:1883.
+      - EMQX_LISTENERS__TCP__DEFAULT__ENABLE=false
+
+      # [tarea 1 issue 5] Configuración del listener SSL 8883 con nuestros propios certificados:
+      # Apunta a los archivos montados en el volumen ./certs (no utiliza los certificados de ejemplo de EMQX).
       - EMQX_LISTENERS__SSL__DEFAULT__SSL_OPTIONS__CACERTFILE=/opt/emqx/certs/ca.crt
       - EMQX_LISTENERS__SSL__DEFAULT__SSL_OPTIONS__CERTFILE=/opt/emqx/certs/server.crt
       - EMQX_LISTENERS__SSL__DEFAULT__SSL_OPTIONS__KEYFILE=/opt/emqx/certs/server.key
+
     volumes:
+      # [tarea 5 issue 5] Volúmenes con nombre para persistencia de datos y logs:
+      # Garantiza que clientes registrados, métricas y estado del broker sobrevivan
+      # a la destrucción y recreación del contenedor (docker compose down / up).
       - emqx_data:/opt/emqx/data
       - emqx_log:/opt/emqx/log
-      # Montaje de certificados (para cuando habilitemos TLS en el puerto 8883)
+
+      # [tarea 1 issue 5] Montaje de solo lectura (:ro) para los certificados TLS generados
       - ./certs:/opt/emqx/certs:ro
 
+      # [tarea 5 issue 5] Configuración versionada montada desde el repositorio:
+      # Monta el archivo acl.conf controlado por Git para que las reglas de autorización
+      # se apliquen de forma consistente sin depender de la UI del broker.
+      - ./emqx/acl.conf:/opt/emqx/etc/acl.conf:ro
+
+  # ==============================================================================
+  # SERVICIO 2: RECEPTOR HTTP DE WEBHOOKS
+  # ==============================================================================
   receptor:
     build:
       context: ../receptor
@@ -32,9 +70,11 @@ services:
     ports:
       - "5000:5000"
     environment:
+      # Secreto compartido validado en el header HTTP X-Webhook-Secret
       - WEBHOOK_SECRET=${WEBHOOK_SECRET:-SistDistrSecret2026!}
       - MAX_AVISOS=50
 
+# [tarea 5 issue5] Declaración de volúmenes persistentes gestionados por Docker
 volumes:
   emqx_data:
   emqx_log:
