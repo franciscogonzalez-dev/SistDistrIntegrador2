@@ -18,6 +18,10 @@ broker/certs/*.key
 servicio/certs/*.key
 clientes/certs/*.key
 
+# Certificados TLS (solo para desarrollo, no subir al repo)
+*.crt
+certs/*.crt
+
 # ==========================================
 # Bases de datos y persistencia local
 # ==========================================
