@@ -1,23 +1,25 @@
 #!/usr/bin/env bash
 # ==============================================================================
 # scripts/generar_certs.sh
-# [TAREA 1 DE ISSUE #5] Generación de certificados TLS propios para EMQX y clientes.
-# Crea una Certificate Authority (CA) propia y un certificado de servidor con SAN.
+# Generación de certificados TLS propios para EMQX y clientes.
+# Reutiliza la CA si ya existe y genera el certificado del broker con SAN múltiple.
 # Los archivos generados se ubican en: broker/certs/
 # ==============================================================================
 set -euo pipefail
 
-# Validación de parámetros de entrada
+# 1. En Windows, si OPENSSL_CONF apunta a otra app (ej. PostgreSQL), openssl falla al arrancar
+unset OPENSSL_CONF 2>/dev/null || true
+
+# Validación de parámetros de entrada (acepta 1 o más destinos)
 if [ "$#" -lt 1 ]; then
-    echo "Uso: $0 <ip-o-nombre>"
+    echo "Uso: $0 <ip-o-nombre> [ip-o-nombre-2 ...]"
     echo "Ejemplos:"
     echo "  $0 localhost"
-    echo "  $0 192.168.1.50"
-    echo "  $0 broker.local"
+    echo "  $0 broker.local 100.64.0.1 192.168.1.50"
     exit 1
 fi
 
-TARGET="$1"
+PRIMARY_TARGET="$1"
 
 # Resolución dinámica de rutas relativas a la raíz del proyecto
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -37,44 +39,79 @@ else
 fi
 
 echo "==> Generando certificados en: $OUT_DIR_PATH"
-echo "==> Destino principal (Target): $TARGET"
 
 # ------------------------------------------------------------------------------
-# PASO 1 para EMQX con TLS: Generar clave privada y certificado autofirmado de la CA
+# PASO 1: Reutilizar o crear la CA propia (ca.key, ca.crt)
+# ------------------------------------------------------------------------------
+CA_KEY="$OUT_DIR_PATH/ca.key"
+CA_CRT="$OUT_DIR_PATH/ca.crt"
 
-# ca.key: Clave privada de 4096 bits para firmar certificados (ignorada por Git en .gitignore)
-# ca.crt: Certificado público raíz que deben poseer todos los clientes (clientes/ y servicio/)
-echo "==> [1/4] Creando CA propia (ca.key, ca.crt)..."
-openssl genrsa -out "$OUT_DIR_PATH/ca.key" 4096
-openssl req -x509 -new -nodes -key "$OUT_DIR_PATH/ca.key" -sha256 -days 365 \
-    -subj "/C=AR/ST=BA/O=DistrOrg/CN=DistrCA" \
-    -out "$OUT_DIR_PATH/ca.crt"
+ca_valida=false
+if [ -f "$OUT_DIR/ca.key" ] && [ -f "$OUT_DIR/ca.crt" ]; then
+    # Verificar que la clave privada coincida con el certificado de la CA
+    KEY_MOD=$(openssl rsa -noout -modulus -in "$CA_KEY" 2>/dev/null | openssl md5 || true)
+    CRT_MOD=$(openssl x509 -noout -modulus -in "$CA_CRT" 2>/dev/null | openssl md5 || true)
+    if [ -n "$KEY_MOD" ] && [ "$KEY_MOD" = "$CRT_MOD" ]; then
+        ca_valida=true
+    else
+        echo "==> [Aviso] ca.key y ca.crt existentes no coinciden. Regenerando CA..."
+    fi
+fi
+
+if [ "$ca_valida" = true ]; then
+    echo "==> [1/4] Reutilizando CA existente ($CA_KEY, $CA_CRT)..."
+else
+    echo "==> [1/4] Creando CA propia (ca.key, ca.crt)..."
+    openssl genrsa -out "$CA_KEY" 4096
+    openssl req -x509 -new -nodes -key "$CA_KEY" -sha256 -days 365 \
+        -subj "/C=AR/ST=BA/O=DistrOrg/CN=DistrCA" \
+        -out "$CA_CRT"
+fi
 
 # ------------------------------------------------------------------------------
-# PASO 2: Generar clave privada del broker (servidor MQTT)
-
-# server.key: Clave privada de 2048 bits para el handshake TLS en el puerto 8883
+# PASO 2: Generar clave privada del broker (server.key)
+# ------------------------------------------------------------------------------
 echo "==> [2/4] Creando clave privada del broker (server.key)..."
 openssl genrsa -out "$OUT_DIR_PATH/server.key" 2048
 
 # ------------------------------------------------------------------------------
-# PASO 3: Configurar Subject Alternative Name (SAN)
+# PASO 3: Configurar Subject Alternative Name (SAN) múltiple sin duplicados
+# ------------------------------------------------------------------------------
+SAN_LIST=()
 
-# Obligatorio en TLS moderno: los clientes validan que el host al que se conectan
-# coincida con el CN o con alguno de los SAN (DNS o IP).
-if [[ "$TARGET" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-    SAN_EXT="IP:$TARGET,IP:127.0.0.1,DNS:localhost"
-else
-    SAN_EXT="DNS:$TARGET,DNS:localhost,IP:127.0.0.1"
-fi
+agregar_san() {
+    local val="$1"
+    local entrada
+    if [[ "$val" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        entrada="IP:$val"
+    else
+        entrada="DNS:$val"
+    fi
+    for exist in "${SAN_LIST[@]}"; do
+        if [[ "$exist" == "$entrada" ]]; then
+            return 0
+        fi
+    done
+    SAN_LIST+=("$entrada")
+}
+
+# Agregar todos los destinos pasados como argumento
+for target in "$@"; do
+    agregar_san "$target"
+done
+# Asegurar siempre localhost y 127.0.0.1 como fallback
+agregar_san "localhost"
+agregar_san "127.0.0.1"
+
+SAN_EXT=$(IFS=,; echo "${SAN_LIST[*]}")
 echo "==> [3/4] SAN configurado: $SAN_EXT"
 
 CSR_FILE="$OUT_DIR_PATH/server.csr"
 EXT_FILE="$OUT_DIR_PATH/server_ext.cnf"
 
-# Generar la solicitud de firma de certificado (CSR)
+# Generar la solicitud de firma (CSR) usando el primer destino como CN
 openssl req -new -key "$OUT_DIR_PATH/server.key" \
-    -subj "/C=AR/ST=BA/O=DistrOrg/CN=$TARGET" \
+    -subj "/C=AR/ST=BA/O=DistrOrg/CN=$PRIMARY_TARGET" \
     -out "$CSR_FILE"
 
 # Archivo de extensiones X.509 v3 para incluir los SAN
@@ -86,13 +123,12 @@ subjectAltName = $SAN_EXT
 EOF
 
 # ------------------------------------------------------------------------------
-# PASO 4: Firmar server.crt usando nuestra propia CA
-
-# server.crt: Certificado público del broker que presenta a los clientes al conectar
+# PASO 4: Firmar server.crt con la CA
+# ------------------------------------------------------------------------------
 echo "==> [4/4] Firmando server.crt con la CA..."
 openssl x509 -req -in "$CSR_FILE" \
-    -CA "$OUT_DIR_PATH/ca.crt" \
-    -CAkey "$OUT_DIR_PATH/ca.key" \
+    -CA "$CA_CRT" \
+    -CAkey "$CA_KEY" \
     -CAcreateserial \
     -out "$OUT_DIR_PATH/server.crt" \
     -days 365 \
@@ -102,10 +138,14 @@ openssl x509 -req -in "$CSR_FILE" \
 # Limpieza de archivos temporales
 rm -f "$CSR_FILE" "$EXT_FILE" "$OUT_DIR_PATH/ca.srl"
 
-# Permisos seguros: claves privadas con lectura restringida, certificados legibles
-chmod 600 "$OUT_DIR_PATH/ca.key" "$OUT_DIR_PATH/server.key" 2>/dev/null || true
-chmod 644 "$OUT_DIR_PATH/ca.crt" "$OUT_DIR_PATH/server.crt" 2>/dev/null || true
+# Permisos:
+# - ca.key: solo dueño (600), no la usa Docker
+# - server.key: lectura para el contenedor (644), donde EMQX corre como uid 1000
+# - certificados públicos: lectura general (644)
+chmod 600 "$OUT_DIR_PATH/ca.key"
+chmod 644 "$OUT_DIR_PATH/server.key"
+chmod 644 "$OUT_DIR_PATH/ca.crt" "$OUT_DIR_PATH/server.crt"
 
 echo ""
 echo "==> ¡Certificados generados exitosamente!"
-ls -la "$OUT_DIR_PATH"
+ls -la "$OUT_DIR"
