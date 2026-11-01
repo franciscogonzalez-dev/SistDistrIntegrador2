@@ -1,5 +1,5 @@
 # ==========================================
-# Contexto y notas internas del asistente
+# Notas locales
 # ==========================================
 proyecto2-contexto/
 
@@ -9,6 +9,7 @@ proyecto2-contexto/
 .env
 *.env
 !.env.example
+clientes/credenciales.json
 
 # Claves privadas TLS (NUNCA deben subirse al repo)
 *.key
@@ -24,6 +25,7 @@ clientes/certs/*.key
 *.sqlite
 *.sqlite3
 servicio/data/
+receptor/datos/
 
 # Datos y logs locales de EMQX (si se montan como volumen de Docker)
 broker/emqx_data/

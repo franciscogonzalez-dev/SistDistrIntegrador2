@@ -1,7 +1,9 @@
 import os
+import hmac
 import json
 import logging
-from datetime import datetime
+from pathlib import Path
+from datetime import datetime, timedelta, timezone
 from collections import deque
 from flask import Flask, request, jsonify, render_template_string
 
@@ -9,12 +11,22 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 
 app = Flask(__name__)
 
-# Secreto compartido configurable por variable de entorno
-WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "SistDistrSecret2026!") 
+# Secreto compartido por variable de entorno (sale del .env, que no se sube al repo).
+# Sin secreto no arranca: un valor por defecto en el codigo seria un secreto publico
+WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET")
+if not WEBHOOK_SECRET:
+    raise SystemExit("Falta la variable WEBHOOK_SECRET (ver broker/.env.example)")
 
-# Historial en memoria de los últimos N avisos
+# El container corre en UTC: la hora de los avisos se muestra en la de Argentina (UTC-3, sin horario de verano)
+ZONA_HORARIA = timezone(timedelta(hours=-3))
+
+# Historial de los últimos N avisos
 MAX_AVISOS = int(os.getenv("MAX_AVISOS", "50")) #ahora lo confugré en 50 pero se puede configurar
 avisos_log = deque(maxlen=MAX_AVISOS)
+
+# Cada aviso tambien se agrega a un archivo (una linea JSON por aviso), en un volumen de Docker:
+# si el container se reinicia o se recrea, la pagina vuelve a mostrar los ultimos avisos
+ARCHIVO_AVISOS = Path(os.getenv("ARCHIVO_AVISOS", Path(__file__).resolve().parent / "datos" / "avisos.jsonl"))
 
 HTML_TEMPLATE = """
 <!DOCTYPE html>
@@ -68,10 +80,33 @@ HTML_TEMPLATE = """
 
 def verificar_secreto(): #si la clave secreta de la request POST no coincide o directamente no está, se rechaza la peticion
     header_secret = request.headers.get("X-Webhook-Secret")
-    if not header_secret or header_secret != WEBHOOK_SECRET:
+    #compare_digest tarda lo mismo acierte o no, asi no se puede adivinar el secreto midiendo el tiempo de respuesta
+    if not header_secret or not hmac.compare_digest(header_secret.encode(), WEBHOOK_SECRET.encode()):
         logging.warning("Acceso no autorizado: X-Webhook-Secret inválido o ausente.")
         return False
     return True
+
+def cargar_avisos():
+    if not ARCHIVO_AVISOS.exists():
+        return
+    with open(ARCHIVO_AVISOS, encoding="utf-8") as f:
+        for linea in f:
+            try:
+                avisos_log.appendleft(json.loads(linea)) #la deque se queda con los ultimos MAX_AVISOS
+            except json.JSONDecodeError:
+                #una linea cortada (el container murio mientras escribia) no tiene que impedir que arranque
+                logging.warning("Línea inválida en %s, se ignora", ARCHIVO_AVISOS)
+
+def guardar_aviso(tipo, payload_str):
+    aviso = {
+        "timestamp": datetime.now(ZONA_HORARIA).strftime("%Y-%m-%d %H:%M:%S"),
+        "tipo": tipo,
+        "payload": payload_str
+    }
+    avisos_log.appendleft(aviso)
+    ARCHIVO_AVISOS.parent.mkdir(parents=True, exist_ok=True)
+    with open(ARCHIVO_AVISOS, "a", encoding="utf-8") as f:
+        f.write(json.dumps(aviso, ensure_ascii=False) + "\n")
 
 def parse_payload():
     data = request.get_json(silent=True)
@@ -92,12 +127,7 @@ def aviso_directo():
         return jsonify({"error": "No autorizado"}), 401
 
     payload_str = parse_payload()
-    aviso = {
-        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "tipo": "directo",
-        "payload": payload_str
-    }
-    avisos_log.appendleft(aviso)
+    guardar_aviso("directo", payload_str)
     logging.info(f"[DIRECTO] Aviso recibido: {payload_str}")
     return jsonify({"status": "ok", "tipo": "directo"}), 200
 
@@ -107,18 +137,15 @@ def aviso_regla():
         return jsonify({"error": "No autorizado"}), 401
 
     payload_str = parse_payload()
-    aviso = {
-        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "tipo": "regla",
-        "payload": payload_str
-    }
-    avisos_log.appendleft(aviso)
+    guardar_aviso("regla", payload_str)
     logging.info(f"[REGLA] Aviso recibido: {payload_str}")
     return jsonify({"status": "ok", "tipo": "regla"}), 200
 
 @app.route("/health", methods=["GET"])
 def health():
     return jsonify({"status": "healthy"}), 200
+
+cargar_avisos()
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)

@@ -38,7 +38,7 @@ De seguridad y webhooks (#6 y #17):
 14. ¿Qué condición dispara el webhook por regla? ¿ACL denegada, emergencia nueva o las dos?
 El TP pide 2 webhooks:
 Webhook directo (sin mirar el contenido): Se dispara con cada conexión y desconexión de un cliente, que es el ejemplo de la consigna. En el receptor se vería algo así: "10:42 amb-07 se conectó", "10:55 pol-02 se desconectó". Para su caso sirve como registro de actividad del centro de monitoreo: quién entró y quién salió. No tiene que leer ningún payload, por eso va directo.
-Emergencia Nueva (disparado por regla, una consulta SQL decide cuando): el servicio publica una emergencia nueva, permite ver al receptor “Nueva emergencia: se requiere ambulancia en -43.25, -65.30”.
+Emergencia sin asignar (disparado por regla, una consulta SQL decide cuando): el servicio publica una emergencia en estado `sin_asignar`, permite ver al receptor “Emergencia sin asignar: se requiere ambulancia en -45.86, -67.49”. Se llama "sin asignar" y no "nueva" porque la regla mira cada mensaje por separado: cuando se cae una unidad ocupada, su emergencia vuelve a `sin_asignar` con el mismo payload que cuando entró, y la regla no puede distinguir una de otra. El aviso es cierto en los dos casos.
 15. ¿Qué usuarios de demo hay? Cuántas unidades, despachadores y usuarios del público.
 Rta: en la versión demo hay 1 despachador, al menos 5 usuarios del público y 5 móviles de cada uno (policias, bomberos y ambulancias).
 16. ¿Cómo se ata el client ID al usuario en EMQX? Hay que investigarlo.

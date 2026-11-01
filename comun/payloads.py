@@ -16,6 +16,7 @@ Del lado de quien recibe se usa validar con el spec del mensaje:
 """
 
 import json
+import math
 import time
 import uuid
 
@@ -46,7 +47,17 @@ def nuevo_id():
 
 def _numero(valor):
     #bool es subclase de int en python, no queremos aceptar true como latitud
-    return isinstance(valor, (int, float)) and not isinstance(valor, bool)
+    #json.loads acepta NaN e Infinity: un ts NaN rompe la comparacion con el ultimo ts aceptado
+    return isinstance(valor, (int, float)) and not isinstance(valor, bool) and math.isfinite(valor)
+
+
+def _entre(minimo, maximo):
+    #el rango fisico del valor; la zona valida (Comodoro) la chequea el servicio
+    return lambda valor: _numero(valor) and minimo <= valor <= maximo
+
+
+def _rumbo(valor):
+    return _numero(valor) and 0 <= valor < 360
 
 
 def _texto(valor):
@@ -66,9 +77,9 @@ def _uno_de(opciones):
 POSICION = {
     "v": (_numero, True),
     "ts": (_numero, True),
-    "lat": (_numero, True),
-    "lon": (_numero, True),
-    "rumbo": (_numero, False),
+    "lat": (_entre(-90, 90), True),
+    "lon": (_entre(-180, 180), True),
+    "rumbo": (_rumbo, False),
 }
 
 #ts opcional: el payload del Last Will se define al conectar, tendria la hora de conexion y no la de la caida
@@ -90,8 +101,8 @@ PEDIDO = {
     "v": (_numero, True),
     "id": (_texto, True),
     "ts": (_numero, True),
-    "lat": (_numero, True),
-    "lon": (_numero, True),
+    "lat": (_entre(-90, 90), True),
+    "lon": (_entre(-180, 180), True),
 }
 
 FLOTA_ESTADO = {
@@ -99,9 +110,9 @@ FLOTA_ESTADO = {
     "ts": (_numero, True),
     "conexion": (_uno_de(ESTADOS_CONEXION), True),
     "disponibilidad": (_uno_de(DISPONIBILIDADES), True),
-    "lat": (_numero, False), #sin posicion valida todavia, la unidad no aparece en el mapa
-    "lon": (_numero, False),
-    "rumbo": (_numero, False),
+    "lat": (_entre(-90, 90), False), #sin posicion valida todavia, la unidad no aparece en el mapa
+    "lon": (_entre(-180, 180), False),
+    "rumbo": (_rumbo, False),
     "eid": (_texto, False),
 }
 
@@ -109,8 +120,8 @@ EMERGENCIA = {
     "v": (_numero, True),
     "eid": (_texto, True),
     "ts": (_numero, True),
-    "lat": (_numero, True),
-    "lon": (_numero, True),
+    "lat": (_entre(-90, 90), True),
+    "lon": (_entre(-180, 180), True),
     "estado": (_uno_de(ESTADOS_EMERGENCIA), True),
     "unidad": (_texto, False),
 }
