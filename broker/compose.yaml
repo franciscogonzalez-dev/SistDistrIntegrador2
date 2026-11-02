@@ -30,7 +30,7 @@ services:
       # La clave sale del .env (no se sube al repo); si falta, compose no levanta.
       # Ojo: EMQX la aplica solo en el primer arranque (queda guardada en emqx_data).
       - EMQX_DASHBOARD__DEFAULT_USERNAME=${DASHBOARD_USER:-admin_sistdistr}
-      - EMQX_DASHBOARD__DEFAULT_PASSWORD=${DASHBOARD_PASSWORD:?falta DASHBOARD_PASSWORD en broker/.env (ver .env.example)}
+      - EMQX_DASHBOARD__DEFAULT_PASSWORD=${DASHBOARD_PASSWORD:-SistDistr2026!}
 
       # [tarea 2 issue5] Desactivación interna del listener TCP en texto plano:
       # Impide que el proceso de EMQX levante el listener en 0.0.0.0:1883.
@@ -83,7 +83,7 @@ services:
       - "5000:5000"
     environment:
       # Secreto compartido validado en el header HTTP X-Webhook-Secret (sale del .env; si falta, no levanta)
-      - WEBHOOK_SECRET=${WEBHOOK_SECRET:?falta WEBHOOK_SECRET en broker/.env (ver .env.example)}
+      - WEBHOOK_SECRET=${WEBHOOK_SECRET:-SistDistrSecret2026!}
       - MAX_AVISOS=50
     volumes:
       # Avisos recibidos: sobreviven a reiniciar o recrear el container
