@@ -3,7 +3,7 @@ services:
   # SERVICIO 1: BROKER MQTT (EMQX)
   # ==============================================================================
   emqx:
-    image: emqx/emqx:5.8.0
+    image: emqx/emqx:latest
     container_name: emqx_broker
 
     # Política de reinicio automático ante caídas o reinicios del servidor [issue 5]
@@ -66,10 +66,12 @@ services:
       # [tarea 1 issue 5] Montaje de solo lectura (:ro) para los certificados TLS generados
       - ./certs:/opt/emqx/certs:ro
 
-      # [tarea 5 issue 5] Configuración versionada montada desde el repositorio:
-      # Monta el archivo acl.conf controlado por Git para que las reglas de autorización
-      # se apliquen de forma consistente sin depender de la UI del broker.
+      # [tarea 5 issue 5 e issue 6] Configuración versionada montada desde el repositorio:
+      # Monta emqx.conf, acl.conf y usuarios.csv para que la autenticación (cinfo + base interna)
+      # y las reglas de autorización sobrevivan a la recreación del contenedor sin depender de la UI.
+      - ./emqx/emqx.conf:/opt/emqx/etc/emqx.conf:ro
       - ./emqx/acl.conf:/opt/emqx/etc/acl.conf:ro
+      - ./emqx/usuarios.csv:/opt/emqx/etc/usuarios.csv:ro
 
   # ==============================================================================
   # SERVICIO 2: RECEPTOR HTTP DE WEBHOOKS
