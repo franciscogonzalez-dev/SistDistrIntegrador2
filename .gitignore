@@ -11,6 +11,10 @@ proyecto2-contexto/
 !.env.example
 clientes/credenciales.json
 
+# Usuarios y claves de EMQX (REGLA DE ORO: fuera del repo)
+broker/emqx/usuarios.csv
+!broker/emqx/usuarios.example.csv
+
 # Claves privadas TLS (NUNCA deben subirse al repo)
 *.key
 certs/*.key
