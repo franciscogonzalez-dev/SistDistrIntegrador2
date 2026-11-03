@@ -52,7 +52,11 @@ if [ -f "$OUT_DIR/ca.key" ] && [ -f "$OUT_DIR/ca.crt" ]; then
     KEY_MOD=$(openssl rsa -noout -modulus -in "$CA_KEY" 2>/dev/null | openssl md5 || true)
     CRT_MOD=$(openssl x509 -noout -modulus -in "$CA_CRT" 2>/dev/null | openssl md5 || true)
     if [ -n "$KEY_MOD" ] && [ "$KEY_MOD" = "$CRT_MOD" ]; then
-        ca_valida=true
+        if openssl x509 -noout -text -in "$CA_CRT" 2>/dev/null | grep -q "Certificate Sign"; then
+            ca_valida=true
+        else
+            echo "==> [Aviso] ca.crt no incluye extensión keyUsage (requerida por OpenSSL 3 / Python 3.14). Regenerando CA..."
+        fi
     else
         echo "==> [Aviso] ca.key y ca.crt existentes no coinciden. Regenerando CA..."
     fi
@@ -65,6 +69,8 @@ else
     openssl genrsa -out "$CA_KEY" 4096
     openssl req -x509 -new -nodes -key "$CA_KEY" -sha256 -days 365 \
         -subj "/C=AR/ST=BA/O=DistrOrg/CN=DistrCA" \
+        -addext "basicConstraints=critical,CA:TRUE" \
+        -addext "keyUsage=critical,digitalSignature,cRLSign,keyCertSign" \
         -out "$CA_CRT"
 fi
 
