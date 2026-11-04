@@ -32,6 +32,11 @@ try:
 except ModuleNotFoundError:
     from handlers import posicion, presencia, comandos, pedidos
 
+try:
+    from servicio.src.bd import BD
+except ModuleNotFoundError:
+    from bd import BD
+
 # Configuración de logging estándar
 logging.basicConfig(
     level=logging.INFO,
@@ -44,6 +49,7 @@ USUARIO_DEFAULT = "servicio"
 EXPIRACION_SESION_SEG = 86400  # 24 horas (docs/topics.md: no pierde pedidos ni comandos si se reinicia)
 CA_CERTS_DEFAULT = "broker/certs/ca.crt"
 
+RUTA_BD = os.getenv("SERVICIO_DB", "servicio/data/bd_servicio.db")#al dockerizar se modifica la ruta
 
 class ServicioCentral:
     """Núcleo central del sistema distribuido de emergencias."""
@@ -55,13 +61,19 @@ class ServicioCentral:
         usuario=USUARIO_DEFAULT,
         password=None,
         ca_certs=CA_CERTS_DEFAULT,
+        ruta_bd=RUTA_BD
     ):
         self.ip_broker = ip_broker
         self.puerto = puerto
         self.usuario = usuario
         self.password = password
         self.activo = False
-
+        try:
+            self.bd = BD(ruta_bd)
+        except Exception as e:
+            logger.exception("Error al instanciar la base de datos: %s", e)
+            raise #sin bd el servicio no funciona
+        
         # Validación del certificado de CA si se usa TLS
         ca_file = None
         if ca_certs:
@@ -127,7 +139,7 @@ class ServicioCentral:
             logger.warning("Tópico de reporte inválido '%s': %s", msg.topic, e)
             return
 
-        posicion.procesar(self.cliente, tipo, unidad, msg.payload)
+        posicion.procesar(self.cliente, self.bd, tipo, unidad, msg.payload)
 
     def _on_presencia(self, client, userdata, msg):
         """Maneja eventos de conexión/desconexión: reportes/{tipo}/{unidad}/presencia."""
@@ -139,7 +151,7 @@ class ServicioCentral:
             logger.warning("Tópico de reporte inválido '%s': %s", msg.topic, e)
             return
 
-        presencia.procesar(self.cliente, tipo, unidad, msg.payload)
+        presencia.procesar(self.cliente, self.bd, tipo, unidad, msg.payload)
 
     def _on_comando(self, client, userdata, msg):
         """Maneja órdenes del despachador: comandos/{despachador}/{tipo}/{unidad}."""
@@ -195,6 +207,8 @@ class ServicioCentral:
         # Desconexión con Reason Code 0x04 ("Disconnect with Will Message"):
         # Notifica inmediatamente a EMQX para que difunda 'servicio/estado' = 'offline'
         self.cliente.stop(con_last_will=True)
+        self.bd.cerrar_conn()
+        
         logger.info("Servicio Central detenido.")
 
 
