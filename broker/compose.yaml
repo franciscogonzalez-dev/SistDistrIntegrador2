@@ -3,7 +3,7 @@ services:
   # SERVICIO 1: BROKER MQTT (EMQX)
   # ==============================================================================
   emqx:
-    image: emqx/emqx:latest
+    image: emqx/emqx:6.3.1
     container_name: emqx_broker
 
     # Política de reinicio automático ante caídas o reinicios del servidor [issue 5]

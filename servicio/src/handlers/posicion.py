@@ -5,12 +5,13 @@ descarte de saltos imposibles y publicación oficial en flota/{tipo}/{unidad}/es
 """
 
 import logging
-from comun import payloads, topics
-
+from comun import payloads
+import sqlite3
+from . import pub_salidas
 logger = logging.getLogger("servicio.posicion")
 
 
-def procesar(cliente, tipo, unidad, raw_payload):
+def procesar(cliente, bd, tipo, unidad, raw_payload):
     """Procesa un reporte de telemetría emitido por una unidad."""
     try:
         datos = payloads.validar(payloads.POSICION, raw_payload)
@@ -23,21 +24,20 @@ def procesar(cliente, tipo, unidad, raw_payload):
             datos.get("rumbo"),
         )
 
-        # Publicación oficial en flota/{tipo}/{unidad}/estado (QoS 1, retained=True)
-        topic_flota = topics.flota_estado(tipo, unidad)
-        estado_oficial = payloads.flota_estado(
-            conexion="online",
-            disponibilidad="libre",
-            lat=datos["lat"],
-            lon=datos["lon"],
-            rumbo=datos.get("rumbo"),
-            ts=datos["ts"],
-        )
-        if cliente:
-            cliente.publish(estado_oficial, topic=topic_flota, qos=1, retain=True)
-            logger.info("-> Publicado estado oficial en %s", topic_flota)
+        # #9: leer la posicion anterior con bd.leer_unidad y descartar ts viejos o saltos imposibles
+
+        #primero guardamos en la bd la posicion (unidad, tipo, lat, lon, rumbo, ts_posicion)
+            #si falla no se publica: salta al except de sqlite3
+        with bd.transaccion():
+            bd.guardar_posicion(tipo, unidad, datos["lat"], datos["lon"], datos.get("rumbo"), datos["ts"])
+
+        #publicacion oficial en flota/{tipo}/{unidad}/estado (QoS 1, retained=True)
+        pub_salidas.publicar_flota(cliente, bd, tipo, unidad)
 
         return datos
     except payloads.PayloadInvalido as e:
         logger.warning("Posición inválida descartada de %s: %s", unidad, e)
+        return None
+    except sqlite3.Error:
+        logger.exception("No se pudo guardar la posición de %s, no se publica", unidad)
         return None

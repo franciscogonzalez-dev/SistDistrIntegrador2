@@ -25,6 +25,7 @@ class TestRouterServicio(unittest.TestCase):
             puerto=1883,
             usuario="servicio",
             ca_certs=None,
+            ruta_bd=":memory:",
         )
 
     def test_on_posicion_valida(self):
