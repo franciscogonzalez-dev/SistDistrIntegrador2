@@ -119,7 +119,7 @@ class DespachadorBasico:
         # { "E-01": {"tipo": "ambulancia", "lat": -45.86, "lon": -67.48, "estado": "sin_asignar", "unidad": None} }
         self.emergencias = {}
 
-        # Mapeo de idempotencia de comandos para reintentos:
+        # Mapeo de idempotencia de comandos sin respuesta todavía (se borra al responder el servicio):
         # { "asignar:amb-01:E-01": "uuid-...", "liberar:amb-01": "uuid-..." }
         self.comandos_ids = {}
 
@@ -820,7 +820,7 @@ class DespachadorBasico:
         self._actualizar_resumen_flota()
 
         # Si hay una emergencia seleccionada, refrescar los móviles disponibles
-        if self.emergencia_seleccionada_id:
+        if self.emergencia_seleccionada_id in self.emergencias:
             self._actualizar_combo_unidades_libres(self.emergencias[self.emergencia_seleccionada_id]["tipo"])
 
         # Si esta unidad está seleccionada en el detalle de flota, refrescar tarjeta
@@ -977,13 +977,16 @@ class DespachadorBasico:
 
     def preparar_reasignacion(self, eid, tipo):
         """Focaliza la emergencia caída para que el despachador seleccione una nueva unidad con 1 clic."""
+        self.ocultar_alerta_banner()
+        # Pudo cerrarse entre que llegó la alerta y el clic en el banner
+        if eid not in self.emergencias:
+            self.registrar_evento(f"La emergencia {eid} ya no está activa.", tag="info")
+            return
         self.notebook.select(self.tab_emergencias)
         self.seleccionar_emergencia_por_id(eid)
-        if eid in self.emergencias:
-            em = self.emergencias[eid]
-            self.mapa.set_position(em["lat"], em["lon"])
-            self.mapa.set_zoom(15)
-        self.ocultar_alerta_banner()
+        em = self.emergencias[eid]
+        self.mapa.set_position(em["lat"], em["lon"])
+        self.mapa.set_zoom(15)
 
     # ==========================================================================
     # RESPUESTAS Y COMANDOS RECHAZADOS (TAREA 5)
@@ -997,6 +1000,10 @@ class DespachadorBasico:
         cmd_id = datos.get("id", "desconocido")
         ok = datos.get("ok", False)
         motivo = datos.get("motivo", "Sin detalle especificado")
+
+        # La acción ya tuvo respuesta: repetirla es una acción nueva y lleva otro id.
+        # Con el mismo id el servicio la tomaría como duplicado y no la aplicaría (docs/topics.md, Idempotencia)
+        self.comandos_ids = {accion: id_cmd for accion, id_cmd in self.comandos_ids.items() if id_cmd != cmd_id}
 
         if not ok:
             texto_rechazo = f"❌ COMANDO RECHAZADO: {motivo} (ID: {cmd_id[:8]}...)"
@@ -1072,6 +1079,9 @@ class DespachadorBasico:
             and info["datos"].get("disponibilidad") == "libre"
         ]
         self.cbo_unidades_libres["values"] = sorted(libres)
+        # Se llama con cada mensaje de flota/: si el móvil elegido sigue libre, no se le cambia la selección
+        if self.cbo_unidades_libres.get() in libres:
+            return
         if libres:
             self.cbo_unidades_libres.current(0)
         else:

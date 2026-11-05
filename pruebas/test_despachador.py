@@ -10,6 +10,8 @@ import time
 
 from comun import topics, payloads
 from clientes.despachador import DespachadorBasico
+from servicio.src.bd import BD
+from servicio.src.handlers import posicion, presencia
 
 
 class DummyMessage:
@@ -18,11 +20,11 @@ class DummyMessage:
         self.payload = payload if isinstance(payload, bytes) else (payload.encode("utf-8") if isinstance(payload, str) else json.dumps(payload).encode("utf-8"))
 
 
-class TestDespachadorLogica(unittest.TestCase):
+class BaseDespachador(unittest.TestCase):
 
     def setUp(self):
         # Parchear MQTTPub y la descarga de tiles del mapa para pruebas rápidas
-        with patch("comun.publisher.MQTTPub"), patch("tkintermapview.TkinterMapView.set_tile_server"):
+        with patch("clientes.despachador.MQTTPub"), patch("tkintermapview.TkinterMapView.set_tile_server"):
             self.desp = DespachadorBasico(
                 ip_broker="127.0.0.1",
                 puerto=8883,
@@ -43,6 +45,9 @@ class TestDespachadorLogica(unittest.TestCase):
             self.desp.root.destroy()
         except Exception:
             pass
+
+
+class TestDespachadorLogica(BaseDespachador):
 
     def test_on_emergencia_valida(self):
         """Verifica que una emergencia válida se parsee y se encole correctamente."""
@@ -221,6 +226,137 @@ class TestDespachadorLogica(unittest.TestCase):
 
         self.assertEqual(self.desp.frame_alerta.winfo_manager(), "pack")
         self.assertIn("Unidad amb-01 ya ocupada", self.desp.lbl_alerta_msg.cget("text"))
+
+    def _id_publicado(self):
+        return self.mock_cliente.publish.call_args.args[0]["id"]
+
+    def test_liberar_otra_vez_tras_la_respuesta_usa_id_nuevo(self):
+        """Liberar la misma unidad en otra emergencia es una acción nueva: el servicio descartaría el id repetido."""
+        self.mock_cliente.publish.return_value = True
+
+        self.desp.liberar_unidad("amb-01", "ambulancia")
+        primer_id = self._id_publicado()
+        self.desp.procesar_respuesta({"id": primer_id, "ok": True})
+
+        self.desp.liberar_unidad("amb-01", "ambulancia")
+        self.assertNotEqual(primer_id, self._id_publicado())
+
+    def test_reintentar_tras_un_rechazo_usa_id_nuevo(self):
+        """Con el mismo id el servicio reenviaría el rechazo anterior sin volver a evaluar la orden."""
+        self.mock_cliente.publish.return_value = True
+
+        self.desp.asignar_unidad("amb-01", "ambulancia", "E-101")
+        primer_id = self._id_publicado()
+        self.desp.procesar_respuesta({"id": primer_id, "ok": False, "motivo": "amb-01 ocupada"})
+
+        self.desp.asignar_unidad("amb-01", "ambulancia", "E-101")
+        self.assertNotEqual(primer_id, self._id_publicado())
+
+    def test_respuesta_de_otro_comando_no_borra_el_id_pendiente(self):
+        self.mock_cliente.publish.return_value = True
+
+        self.desp.liberar_unidad("amb-01", "ambulancia")
+        primer_id = self._id_publicado()
+        self.desp.procesar_respuesta({"id": "otro-comando", "ok": True})
+
+        self.desp.liberar_unidad("amb-01", "ambulancia")
+        self.assertEqual(primer_id, self._id_publicado())
+
+    def _unidad_libre(self, unidad, conexion="online"):
+        estado = {"conexion": conexion, "disponibilidad": "libre", "lat": -45.86, "lon": -67.48}
+        self.desp.actualizar_unidad(unidad, "ambulancia", estado)
+
+    def _emergencia_seleccionada(self, eid="E-60"):
+        self.desp.actualizar_emergencia("ambulancia", eid, {"lat": -45.86, "lon": -67.48, "estado": "sin_asignar"})
+        self.desp.seleccionar_emergencia_por_id(eid)
+
+    def test_mensajes_de_flota_no_cambian_el_movil_elegido(self):
+        """La flota real se publica con cada posición: la selección tiene que sobrevivir a esas actualizaciones."""
+        with patch.object(self.desp.mapa, "set_marker", side_effect=lambda *a, **k: MagicMock(polygon=None, big_circle=None)):
+            self._unidad_libre("amb-01")
+            self._unidad_libre("amb-02")
+            self._emergencia_seleccionada()
+            self.desp.cbo_unidades_libres.set("amb-02")
+
+            self._unidad_libre("amb-01")
+            self.assertEqual(self.desp.cbo_unidades_libres.get(), "amb-02")
+
+            # Si el elegido deja de estar disponible, pasa al primero libre
+            self._unidad_libre("amb-02", conexion="offline")
+            self.assertEqual(self.desp.cbo_unidades_libres.get(), "amb-01")
+
+    def test_reasignar_emergencia_ya_cerrada_no_rompe_el_mapa(self):
+        """Antes dejaba seleccionado un eid inexistente y el siguiente mensaje de flota daba KeyError."""
+        with patch.object(self.desp.mapa, "set_marker", side_effect=lambda *a, **k: MagicMock(polygon=None, big_circle=None)):
+            self._emergencia_seleccionada("E-61")
+            self.desp.cerrar_emergencia("ambulancia", "E-61")
+
+            self.desp.preparar_reasignacion("E-61", "ambulancia")
+            self.assertIsNone(self.desp.emergencia_seleccionada_id)
+            self._unidad_libre("amb-01")
+
+        self.assertIn("amb-01", self.desp.flota_info)
+
+
+class TestDespachadorConServicioReal(BaseDespachador):
+    """Lo que publican los handlers reales de servicio/ tiene que entenderlo el despachador.
+
+    Sin broker: base SQLite en memoria y lo publicado se le entrega al despachador con el mismo
+    json que viajaría por MQTT. Asignar y liberar no están acá porque los implementa #12.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.bd = BD(":memory:")
+        self.addCleanup(self.bd.cerrar_conn)
+        self.servicio = MagicMock()
+        self.parche_marcador = patch.object(
+            self.desp.mapa, "set_marker", side_effect=lambda *a, **k: MagicMock(polygon=None, big_circle=None)
+        )
+        self.parche_marcador.start()
+        self.addCleanup(self.parche_marcador.stop)
+
+    def _entregar_publicaciones(self):
+        """Pasa por los callbacks del despachador todo lo publicado por el servicio y lo procesa."""
+        callbacks = {
+            "flota": self.desp._on_flota,
+            "emergencias": self.desp._on_emergencia,
+            "alertas": self.desp._on_alerta,
+        }
+        for llamada in self.servicio.publish.call_args_list:
+            topic = llamada.kwargs["topic"]
+            callbacks[topic.split("/")[0]](None, None, DummyMessage(topic, llamada.args[0]))
+        self.servicio.publish.reset_mock()
+        self.desp._procesar_mensajes()
+
+    def _unidad_conectada(self):
+        presencia.procesar(self.servicio, self.bd, "ambulancia", "amb-01", payloads.presencia("online"))
+        posicion.procesar(self.servicio, self.bd, "ambulancia", "amb-01", payloads.posicion(-45.86, -67.48, rumbo=90))
+        self._entregar_publicaciones()
+
+    def test_unidad_del_servicio_aparece_libre_en_el_mapa(self):
+        self._unidad_conectada()
+
+        self.assertEqual(self.desp.flota_info["amb-01"]["estado"], "libre")
+        self.assertIn("amb-01", self.desp.marcadores)
+
+    def test_caida_de_unidad_ocupada_alerta_y_permite_reasignar(self):
+        self._unidad_conectada()
+        # lo que va a hacer #12; BD todavia no tiene un metodo para crear emergencias
+        with self.bd.transaccion():
+            self.bd._conn.execute(
+                "INSERT INTO emergencias (eid, tipo, lat, lon, ts, unidad) "
+                "VALUES ('E42', 'ambulancia', -45.87, -67.50, 1, 'amb-01')"
+            )
+
+        presencia.procesar(self.servicio, self.bd, "ambulancia", "amb-01", payloads.presencia("offline"))
+        self._entregar_publicaciones()
+
+        self.assertEqual(self.desp.flota_info["amb-01"]["estado"], "sin_conexion")
+        self.assertEqual(self.desp.emergencias["E42"]["estado"], "sin_asignar")
+        self.assertIsNone(self.desp.emergencias["E42"]["unidad"])
+        self.assertEqual(self.desp.frame_alerta.winfo_manager(), "pack")
+        self.assertIn("E42", self.desp.btn_alerta_accion.cget("text"))
 
 
 if __name__ == "__main__":
