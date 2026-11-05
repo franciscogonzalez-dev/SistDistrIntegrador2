@@ -2,8 +2,10 @@
 No requieren broker MQTT ni Docker levantado.
 """
 
+import json
 import math
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -14,7 +16,8 @@ if str(ROOT_DIR) not in sys.path:
 
 from comun import payloads, topics
 from servicio.src import validador
-from servicio.src.handlers import posicion
+from servicio.src.bd import BD
+from servicio.src.handlers import posicion, presencia
 
 class TestContratosPayloadsYTopics(unittest.TestCase):
     """Verifica los contratos de tópicos y payloads según Paso 2 e Issue #9."""
@@ -165,6 +168,24 @@ class TestValidadorPosicion(unittest.TestCase):
         # Punto claramente fuera del Bounding Box (ej: Buenos Aires)
         self.assertFalse(validador.en_zona(-58.3816, -34.6037))
 
+    def test_mar_pegado_a_la_costa_queda_afuera(self):
+        """El polígono no incluye el mar, tampoco a unos cientos de metros de la costa."""
+        self.assertFalse(validador.en_zona(-67.4496, -45.8231))
+        self.assertFalse(validador.en_zona(-67.4616, -45.8621))
+
+    def test_rutas_del_simulador_quedan_dentro_de_la_zona(self):
+        """Ninguna unidad legítima puede generar una alerta falsa por fuera_de_zona."""
+        for archivo in (ROOT_DIR / "clientes" / "rutas").glob("*.json"):
+            rutas = json.loads(archivo.read_text(encoding="utf-8"))
+            for unidad, info in rutas.items():
+                coords = info["coordenadas"]
+                for (lat1, lon1), (lat2, lon2) in zip(coords, coords[1:] or coords):
+                    pasos = max(1, math.ceil(validador.distancia_metros(lat1, lon1, lat2, lon2) / 10.0))
+                    for i in range(pasos + 1):
+                        lat = lat1 + (lat2 - lat1) * i / pasos
+                        lon = lon1 + (lon2 - lon1) * i / pasos
+                        self.assertTrue(validador.en_zona(lon, lat), f"{unidad} sale de la zona en {lat}, {lon}")
+
     def test_posicion_valida(self):
         """Un reporte sano dentro de Comodoro con reloj sincronizado debe ser aceptado."""
         payload = {
@@ -289,13 +310,12 @@ class TestValidadorPosicion(unittest.TestCase):
         self.assertFalse(valido)
         self.assertEqual(codigo, "ts_repetido_o_viejo")
 
-    def test_reconeccion_omite_salto_imposible(self):
-        """Si la unidad se reconectó tras estar offline, el primer reporte no rechaza por salto."""
+    def test_reporte_tras_un_corte_se_evalua_por_velocidad(self):
+        """Tras 100 s sin reportar, moverse 2 km da 20 m/s y no cuenta como salto."""
         ultimo_estado = {
             "ts": self.hora_base - 100.0,
             "lat": self.centro_lat,
             "lon": self.centro_lon,
-            "recien_conectado": True,
         }
         # Coordenada a 2 km dentro de la ciudad
         nuevo_lat = self.centro_lat + (2000.0 / 111132.0)
@@ -326,16 +346,25 @@ class TestHandlerPosicionSimple(unittest.TestCase):
     """Tests simples para el flujo de publicación oficial y alertas en handlers/posicion.py."""
 
     def setUp(self):
-        posicion.reiniciar_memoria_posiciones()
+        self.bd = BD(":memory:")
         self.cliente = MockCliente()
         self.hora = 1730000000.0
         self.lat_centro = -45.8641
         self.lon_centro = -67.4850
 
+    def _reportar(self, delta=0.0, lat=None, bd=None):
+        """Reporta una posición de pol-01 a self.hora + delta, con el reloj del servicio sincronizado."""
+        ts = self.hora + delta
+        raw = payloads.posicion(lat=lat if lat is not None else self.lat_centro, lon=self.lon_centro, ts=ts)
+        return posicion.procesar(self.cliente, bd or self.bd, "policia", "pol-01", raw, hora_servicio=ts)
+
+    def _ultimo_en_flota(self):
+        return [m for m in self.cliente.mensajes if m["topic"] == "flota/policia/pol-01/estado"][-1]["dato"]
+
     def test_posicion_valida_publica_en_flota(self):
         """Una posición válida se publica en flota/{tipo}/{unidad}/estado (QoS 1, retain=True)."""
         raw = payloads.posicion(lat=self.lat_centro, lon=self.lon_centro, ts=self.hora)
-        posicion.procesar(self.cliente, "policia", "pol-01", raw, hora_servicio=self.hora)
+        posicion.procesar(self.cliente, self.bd, "policia", "pol-01", raw, hora_servicio=self.hora)
 
         # Debe haber 1 publicación en flota y 0 en alertas
         self.assertEqual(len(self.cliente.mensajes), 1)
@@ -347,7 +376,7 @@ class TestHandlerPosicionSimple(unittest.TestCase):
     def test_posicion_en_el_mar_publica_alerta(self):
         """Una posición en el mar se publica en alertas/{tipo} (QoS 1, retain=False) y no en flota."""
         raw_mar = payloads.posicion(lat=-45.8700, lon=-67.3000, ts=self.hora)
-        posicion.procesar(self.cliente, "policia", "pol-01", raw_mar, hora_servicio=self.hora)
+        posicion.procesar(self.cliente, self.bd, "policia", "pol-01", raw_mar, hora_servicio=self.hora)
 
         # Debe haber 1 publicación en alertas y 0 en flota
         self.assertEqual(len(self.cliente.mensajes), 1)
@@ -356,22 +385,84 @@ class TestHandlerPosicionSimple(unittest.TestCase):
         self.assertEqual(alerta["qos"], 1)
         self.assertFalse(alerta["retain"])
         self.assertEqual(alerta["dato"]["motivo"], "posicion_invalida")
+        self.assertEqual(alerta["dato"]["unidad"], "pol-01")
+        # La posición descartada no se guarda
+        self.assertIsNone(self.bd.leer_unidad("pol-01"))
+
+    def test_payload_invalido_publica_alerta(self):
+        """Un payload mal formado se descarta con alerta, sin tocar la BD."""
+        posicion.procesar(self.cliente, self.bd, "policia", "pol-01", b"no es json")
+
+        self.assertEqual([m["topic"] for m in self.cliente.mensajes], ["alertas/policia"])
+        self.assertIsNone(self.bd.leer_unidad("pol-01"))
+
+    def test_unidad_ocupada_sigue_ocupada_al_reportar(self):
+        """Disponibilidad, conexión y eid salen de la BD: reportar posición no libera la unidad."""
+        presencia.procesar(self.cliente, self.bd, "policia", "pol-01", payloads.presencia("online"))
+        self._reportar()
+        with self.bd.transaccion():
+            self.bd._conn.execute(
+                "INSERT INTO emergencias (eid, tipo, lat, lon, ts, unidad) VALUES ('E42', 'policia', -45.87, -67.50, 1, 'pol-01')"
+            )
+
+        self._reportar(delta=1.0)
+
+        estado = self._ultimo_en_flota()
+        self.assertEqual(estado["conexion"], "online")
+        self.assertEqual(estado["disponibilidad"], "ocupada")
+        self.assertEqual(estado["eid"], "E42")
+
+    def test_posicion_rezagada_no_revive_unidad_offline(self):
+        """Una posición que llega después del Last Will no publica la unidad como online."""
+        presencia.procesar(self.cliente, self.bd, "policia", "pol-01", payloads.presencia("online"))
+        self._reportar()
+        presencia.procesar(self.cliente, self.bd, "policia", "pol-01", payloads.presencia("offline"))
+
+        self._reportar(delta=1.0)
+
+        self.assertEqual(self._ultimo_en_flota()["conexion"], "offline")
+
+    def test_offline_conserva_la_ultima_posicion(self):
+        """Al desconectarse la unidad sigue en el mapa: el estado offline mantiene lat y lon."""
+        presencia.procesar(self.cliente, self.bd, "policia", "pol-01", payloads.presencia("online"))
+        self._reportar()
+
+        presencia.procesar(self.cliente, self.bd, "policia", "pol-01", payloads.presencia("offline"))
+
+        estado = self._ultimo_en_flota()
+        self.assertEqual(estado["conexion"], "offline")
+        self.assertEqual(estado["lat"], self.lat_centro)
+        self.assertEqual(estado["lon"], self.lon_centro)
+
+    def test_validaciones_sobreviven_a_un_reinicio(self):
+        """Con la BD en disco, tras reiniciar se siguen rechazando ts viejos y saltos imposibles."""
+        with tempfile.TemporaryDirectory() as carpeta:
+            ruta = str(Path(carpeta) / "bd.db")
+            antes = BD(ruta)
+            self.assertIsNotNone(self._reportar(bd=antes))
+            antes.cerrar_conn()
+
+            despues = BD(ruta)
+            self.assertIsNone(self._reportar(delta=-1.0, bd=despues))  # ts viejo
+            self.assertIsNone(self._reportar(delta=1.0, lat=self.lat_centro + 0.014, bd=despues))  # salto
+            self.assertIsNotNone(self._reportar(delta=2.0, bd=despues))
+            despues.cerrar_conn()
 
     def test_salto_imposible_y_recuperacion(self):
         """Un salto imposible genera alerta, no pisa la flota y el reporte siguiente sano se acepta."""
         # 1. Reporte sano inicial en el centro
         p0 = payloads.posicion(lat=self.lat_centro, lon=self.lon_centro, ts=self.hora)
-        posicion.procesar(self.cliente, "policia", "pol-01", p0, hora_servicio=self.hora)
+        posicion.procesar(self.cliente, self.bd, "policia", "pol-01", p0, hora_servicio=self.hora)
 
         # 2. Salto imposible (+1.5 km en 1 segundo)
         p1 = payloads.posicion(lat=self.lat_centro + 0.014, lon=self.lon_centro, ts=self.hora + 1.0)
-        posicion.procesar(self.cliente, "policia", "pol-01", p1, hora_servicio=self.hora + 1.0)
+        posicion.procesar(self.cliente, self.bd, "policia", "pol-01", p1, hora_servicio=self.hora + 1.0)
 
         # 3. Reporte sano (+40 metros en 2 segundos respecto al reporte 1)
         p2 = payloads.posicion(
             lat=self.lat_centro + (40.0 / 111132.0), lon=self.lon_centro, ts=self.hora + 2.0
         )
-        posicion.procesar(self.cliente, "policia", "pol-01", p2, hora_servicio=self.hora + 2.0)
+        posicion.procesar(self.cliente, self.bd, "policia", "pol-01", p2, hora_servicio=self.hora + 2.0)
 
         # Filtramos qué se publicó en cada tópico
         en_flota = [m for m in self.cliente.mensajes if m["topic"] == "flota/policia/pol-01/estado"]

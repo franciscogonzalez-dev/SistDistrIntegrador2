@@ -144,13 +144,12 @@ def validar_posicion(
             f"Coordenadas lat={lat:.4f}, lon={lon:.4f} fuera de la zona operativa de Comodoro Rivadavia",
         )
 
-    # 4. Salto imposible: verificar velocidad si hay posición previa y no viene de reconectarse
+    # 4. Salto imposible: verificar velocidad si hay posición previa
     if (
         ultimo_estado
         and ultimo_estado.get("lat") is not None
         and ultimo_estado.get("lon") is not None
         and ultimo_estado.get("ts") is not None
-        and not ultimo_estado.get("recien_conectado", False)
     ):
         dt = ts - ultimo_estado["ts"]
         if dt > 0:
