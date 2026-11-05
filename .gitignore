@@ -22,8 +22,6 @@ broker/certs/*.key
 servicio/certs/*.key
 clientes/certs/*.key
 
-*.crt
-
 # ==========================================
 # Bases de datos y persistencia local
 # ==========================================
