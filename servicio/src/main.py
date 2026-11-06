@@ -161,7 +161,7 @@ class ServicioCentral:
             logger.warning("Tópico de comando inválido '%s': %s", msg.topic, e)
             return
 
-        comandos.procesar(self.cliente, despachador, tipo, unidad, msg.payload)
+        comandos.procesar(self.cliente, self.bd, despachador, tipo, unidad, msg.payload)
 
     def _on_pedido(self, client, userdata, msg):
         """Maneja pedidos de auxilio ciudadano: pedidos/{clientid}/{tipo}."""
@@ -171,7 +171,7 @@ class ServicioCentral:
             logger.warning("Tópico de pedido inválido '%s': %s", msg.topic, e)
             return
 
-        pedidos.procesar(self.cliente, clientid, tipo, msg.payload)
+        pedidos.procesar(self.cliente, self.bd, clientid, tipo, msg.payload)
 
     # ==========================================================================
     # CICLO DE VIDA DEL SERVICIO

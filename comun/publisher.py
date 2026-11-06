@@ -115,11 +115,16 @@ class MQTTPub():
             logger.warning("No declaraste topicos para publicar")
             return False #tecnicamente no sirve ponerle un valor, porque esta funcion la ejecuta paho no nosotros y paho no es que usa el valor retornado para algo
 
-        try:
-            payload = json.dumps(dato)
-        except (TypeError, ValueError) as e:
-            logger.exception("dato no serializable a JSON:%s",e)
-            return False
+        if isinstance(dato, (bytes, bytearray)):
+            payload = dato
+        elif isinstance(dato, str) and dato == "":
+            payload = b""
+        else:
+            try:
+                payload = json.dumps(dato)
+            except (TypeError, ValueError) as e:
+                logger.exception("dato no serializable a JSON:%s",e)
+                return False
 
         try:
             info_msg = self._client.publish(topic, payload, qos=qos, retain=retain) # este metodo devuelve un MQTTMessageInfo,
