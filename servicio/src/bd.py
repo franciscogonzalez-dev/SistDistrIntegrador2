@@ -32,6 +32,21 @@ class BD:
         )
     """
     
+    #los pedidos y comandos tienen qos1, para ser idempotente verificamos con la bd
+        #origen guarda el client_id en los pedidos y el despachador si es un topic comandos, sale del topico
+        #resultado guarda el eid en un pedido y la respuesta como json en un comando
+    TABLA_PEDIDOS_COMANDOS_PROCESADOS="""
+        create table if not exists pedidos_comandos_procesados(
+            clase text not null check (clase in ('pedido', 'comando')),
+            origen text not null,
+            id_procesado text not null,
+            resultado text not null,
+            ts real not null,
+            primary key (clase, origen, id_procesado)
+        )
+    """
+    
+    
     LEER_UNIDAD = """
         SELECT u.*, e.eid 
         FROM unidades u
@@ -64,6 +79,15 @@ class BD:
     
     LEER_EMERGENCIA="""
         select * from emergencias where eid = ?
+    """
+
+    LEER_PEDIDOS_COMANDOS_PROCESADOS ="""
+        select * from pedidos_comandos_procesados where id_procesado = ? and clase = ? and origen =?
+    """
+    
+    GUARDAR_ID_PROCESADO = """
+        insert into pedidos_comandos_procesados (clase, origen, id_procesado, resultado, ts)
+        values (?, ?, ?, ?, ?)
     """
 
     
@@ -102,6 +126,7 @@ class BD:
             #es idempotente porque crea la tabla solo si no existe en la bd
             cursor.execute(BD.TABLA_UNIDADES)
             cursor.execute(BD.TABLA_EMERGENCIAS)
+            cursor.execute(BD.TABLA_PEDIDOS_COMANDOS_PROCESADOS)
             
             logger.info("Tablas de unidades y emergencias creadas")
         except sqlite3.Error as e:
@@ -154,6 +179,22 @@ class BD:
             return self._conn.execute(BD.LEER_EMERGENCIA, (eid,)).fetchone()
         except sqlite3.Error as e:
             logger.exception("Error al leer la emergencia: %s", e)
+            raise
+    
+    def leer_id_procesado(self, clase, origen, id_procesado):
+        #devulve una fila si el id de comadno o pedido ya fue procesado, pero llego uno duplicado (qos1 puede enviar varios)
+        #devuleve none si el id comando o pedido nunca fue procesado
+        try:
+            return self._conn.execute(BD.LEER_PEDIDOS_COMANDOS_PROCESADOS, (id_procesado, clase, origen)).fetchone()
+        except sqlite3.Error as e:
+            logger.exception("Error al leer el id procesado: %s",e)
+            raise
+
+    def guardar_procesado(self, clase, origen, id_procesado, resultado, ts):
+        try:
+            self._conn.execute(BD.GUARDAR_ID_PROCESADO, (clase, origen, id_procesado, resultado, ts))
+        except sqlite3.Error as e:
+            logger.exception("No se pudo guardar el id procesado: %s",e)
             raise
     
     def cerrar_conn(self):
