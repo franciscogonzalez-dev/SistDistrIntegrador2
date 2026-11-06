@@ -1,0 +1,9 @@
+.venv
+.git
+**/.env
+**/*.key
+clientes/credenciales.json
+broker/emqx/usuarios.csv
+**/__pycache__
+servicio/data/
+receptor/datos/

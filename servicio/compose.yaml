@@ -1,0 +1,19 @@
+services:
+  servicio:
+    build:
+      # La raiz del repo, para poder copiar comun/
+      context: ..
+      dockerfile: servicio/Dockerfile
+    container_name: servicio
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      # Ruta de adentro del container (pisa la del .env)
+      - MQTT_CA_CERTS=/certs/ca.crt
+    volumes:
+      # La base SQLite sobrevive a la muerte del container
+      - servicio_datos:/app/servicio/data
+      - ../broker/certs/ca.crt:/certs/ca.crt:ro
+
+volumes:
+  servicio_datos:
