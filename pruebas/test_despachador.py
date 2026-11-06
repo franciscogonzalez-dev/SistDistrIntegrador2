@@ -8,7 +8,7 @@ from unittest.mock import MagicMock, patch
 import json
 import time
 
-from comun import topics, payloads
+from comun import topics, payloads, jwt_auth
 from clientes.despachador import DespachadorBasico
 from servicio.src.bd import BD
 from servicio.src.handlers import posicion, presencia
@@ -32,6 +32,7 @@ class BaseDespachador(unittest.TestCase):
                 usuario="desp-01",
                 password="test_password",
                 ca_certs=None,
+                token_jwt=jwt_auth.generar_token("desp-01"),
             )
             # Ocultar la ventana de Tkinter durante los tests
             self.desp.root.withdraw()

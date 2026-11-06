@@ -8,6 +8,7 @@ SistDistrIntegrador2/
 │   ├── publisher.py              # cliente MQTT base: TLS, usuario, Last Will, sesion, subscribe (#3)
 │   ├── topics.py                 # funciones que arman y parsean los topicos, nadie los arma a mano (#1)
 │   ├── payloads.py               # campos obligatorios/opcionales y version "v" de cada mensaje (#1)
+│   ├── jwt_auth.py               # JWT de la sesion local del despachador, no viaja por MQTT (docs/jwt.md)
 │   └── zona.geojson              # poligono de Comodoro Rivadavia, lo usan el servicio y el simulador (#9, #13)
 │
 ├── broker/                       # notebook A (la del broker)
@@ -61,6 +62,7 @@ SistDistrIntegrador2/
 │   ├── dudas_resueltas.md        # decisiones del grupo
 │   ├── topics.md                 # contrato de topicos, payloads, QoS y retained (#1)
 │   ├── acl.md                    # usuarios y tabla de ACL (#2)
+│   ├── jwt.md                    # sesion del despachador con JWT y por que no viaja en los comandos
 │   ├── estructura.md             # este documento
 │   ├── arquitectura.drawio       # diagrama para el informe (#23)
 │   └── capturas/                 # .pcapng y capturas de Wireshark con y sin TLS (#20)
