@@ -47,9 +47,10 @@ if str(CLIENTES_DIR) not in sys.path:
 
 from comun.publisher import MQTTPub, config_entorno
 from comun import topics, payloads, jwt_auth
-from credenciales import clave
+from credenciales import clave, autenticar_despachador
 
 CA_CERTS_DEFAULT = str(ROOT_DIR / "broker" / "certs" / "ca.crt")
+SEG_REVISION_JWT = 30  # cada cuanto se revisa si venció el token de la sesión
 USUARIO_DEFAULT = "desp-01"
 
 # Sesión persistente de 1 h: guarda alertas y respuestas si se cierra la app (docs/topics.md)
@@ -90,8 +91,9 @@ def formato_rumbo(rumbo):
 class DialogoLogin(tk.Toplevel):
     """Ventana modal de autenticación para el operador de despacho con emisión de JWT."""
 
-    def __init__(self, parent, usuario_default="desp-01"):
+    def __init__(self, parent, usuario_default="desp-01", clave_esperada=None):
         super().__init__(parent)
+        self.clave_esperada = clave_esperada
         self.title("🔐 Acceso de Despachador - Autenticación JWT")
         self.geometry("450x340")
         self.resizable(False, False)
@@ -145,11 +147,6 @@ class DialogoLogin(tk.Toplevel):
         ).grid(row=1, column=0, sticky="w", pady=6)
 
         self.ent_clave = tk.Entry(frame_form, show="•", font=("Helvetica", 10), width=22)
-        # Pre-cargar sugerencia si existe en credenciales.json para facilitar la demo/defensa
-        try:
-            self.ent_clave.insert(0, clave(usuario_default))
-        except Exception:
-            pass
         self.ent_clave.grid(row=1, column=1, pady=6, padx=8)
 
         lbl_hint = tk.Label(
@@ -195,17 +192,17 @@ class DialogoLogin(tk.Toplevel):
 
     def _ingresar(self):
         usuario = self.ent_usuario.get().strip()
-        pwd = self.ent_clave.get().strip()
+        pwd = self.ent_clave.get()
         if not usuario or not pwd:
             messagebox.showwarning("Atención", "Por favor ingrese usuario y contraseña.", parent=self)
             return
 
         try:
-            token, claims = jwt_auth.autenticar_despachador(usuario, pwd)
+            token, claims = autenticar_despachador(usuario, pwd, clave_esperada=self.clave_esperada)
             self.resultado = (usuario, pwd, token, claims)
             self.destroy()
-        except Exception as e:
-            messagebox.showerror("Error de Autenticación", f"Credenciales incorrectas: {e}", parent=self)
+        except ValueError as e:
+            messagebox.showerror("Error de Autenticación", str(e), parent=self)
 
     def _cancelar(self):
         self.resultado = None
@@ -234,7 +231,6 @@ class DespachadorBasico:
         self.client_id = client_id
         self.usuario = usuario
         self.password = password
-        self.ca_certs = ca_certs
         self.token_jwt = token_jwt
         self.claims_jwt = None
 
@@ -281,7 +277,7 @@ class DespachadorBasico:
 
         # Flujo de autenticación con Login interactivo si se solicitó
         if pedir_login:
-            dialogo = DialogoLogin(self.root, usuario_default=self.usuario)
+            dialogo = DialogoLogin(self.root, usuario_default=self.usuario, clave_esperada=self.password)
             self.root.wait_window(dialogo)
             if not dialogo.resultado:
                 self.root.destroy()
@@ -289,18 +285,6 @@ class DespachadorBasico:
             self.usuario, self.password, self.token_jwt, self.claims_jwt = dialogo.resultado
             self.client_id = self.usuario
             self.root.deiconify()
-        else:
-            if not self.password:
-                try:
-                    self.password = clave(self.usuario)
-                except Exception:
-                    self.password = None
-            if not self.token_jwt:
-                self.token_jwt = jwt_auth.generar_token(usuario=self.usuario, rol="despachador")
-            try:
-                self.claims_jwt = jwt_auth.verificar_token(self.token_jwt)
-            except Exception:
-                pass
 
         # ----------------------------------------------------------------------
         # 2. Barra superior: Título, resúmenes e indicador del servicio central
@@ -1074,13 +1058,41 @@ class DespachadorBasico:
                 "Sesión Expirada (JWT)",
                 "Su token JWT ha expirado.\nPor seguridad inicie sesión nuevamente.",
             )
-            return False
+            return self._renovar_sesion()
         except jwt_auth.ErrorJWT as e:
             messagebox.showerror(
                 "Token Inválido (JWT)",
                 f"Fallo de verificación de integridad o firma criptográfica JWT:\n{e}",
             )
             return False
+
+    def _actualizar_badge_jwt(self):
+        """Refleja en la barra superior si el token sigue vigente."""
+        try:
+            jwt_auth.verificar_token(self.token_jwt)
+            self.btn_sesion_jwt.config(text=f"🔑 {self.usuario} (JWT Activo 🟢)", bg="#27ae60")
+        except jwt_auth.ErrorJWT:
+            self.btn_sesion_jwt.config(text=f"🔑 {self.usuario} (JWT Vencido 🔴)", bg="#c0392b")
+
+    def _vigilar_vencimiento_jwt(self):
+        #el token vence solo: el badge no puede esperar a que el operador intente despachar
+        self._actualizar_badge_jwt()
+        self.root.after(SEG_REVISION_JWT * 1000, self._vigilar_vencimiento_jwt)
+
+    def _renovar_sesion(self):
+        """Pide login de nuevo sin cerrar la app. La conexion MQTT sigue, asi que tiene que ser el mismo usuario."""
+        self._actualizar_badge_jwt()
+        dialogo = DialogoLogin(self.root, usuario_default=self.usuario, clave_esperada=self.password)
+        self.root.wait_window(dialogo)
+        if not dialogo.resultado:
+            return False
+        usuario, _, token, claims = dialogo.resultado
+        if usuario != self.usuario:
+            messagebox.showerror("Sesión", f"La sesión tiene que renovarla {self.usuario}.")
+            return False
+        self.token_jwt, self.claims_jwt = token, claims
+        self._actualizar_badge_jwt()
+        return True
 
     def mostrar_info_jwt(self):
         """Muestra una ventana modal detallada con los claims y el token JWT de la sesión activa."""
@@ -1206,7 +1218,7 @@ class DespachadorBasico:
             self.comandos_ids[clave_accion] = payloads.nuevo_id()
         cmd_id = self.comandos_ids[clave_accion]
 
-        payload = payloads.comando(accion="asignar", eid=eid, id=cmd_id, jwt=self.token_jwt)
+        payload = payloads.comando(accion="asignar", eid=eid, id=cmd_id)
         topico = topics.comando(self.usuario, tipo, id_unidad)
 
         ok = self.cliente.publish(payload, topic=topico, qos=1, retain=False)
@@ -1235,7 +1247,7 @@ class DespachadorBasico:
             self.comandos_ids[clave_accion] = payloads.nuevo_id()
         cmd_id = self.comandos_ids[clave_accion]
 
-        payload = payloads.comando(accion="liberar", id=cmd_id, jwt=self.token_jwt)
+        payload = payloads.comando(accion="liberar", id=cmd_id)
         topico = topics.comando(self.usuario, tipo, id_unidad)
 
         ok = self.cliente.publish(payload, topic=topico, qos=1, retain=False)
@@ -1484,6 +1496,7 @@ class DespachadorBasico:
 
     def iniciar(self):
         """Inicia el bucle de eventos de la ventana gráfica."""
+        self._vigilar_vencimiento_jwt()
         self.root.mainloop()
 
     def cerrar(self):
@@ -1510,8 +1523,6 @@ if __name__ == "__main__":
     parser.add_argument("--password", type=str, default=None, help="Contraseña MQTT")
     parser.add_argument("--ca-certs", type=str, default=entorno["ca_certs"] or CA_CERTS_DEFAULT, help="Ruta al archivo CA para TLS")
     parser.add_argument("--no-tls", action="store_true", help="Desactivar TLS y conectar en texto plano (puerto 1883)")
-    parser.add_argument("--login", dest="login", action="store_true", default=True, help="Mostrar ventana de inicio de sesión con JWT al iniciar (por defecto)")
-    parser.add_argument("--no-login", dest="login", action="store_false", help="Omitir pantalla de login e ingresar directamente")
 
     args = parser.parse_args()
 
@@ -1530,6 +1541,6 @@ if __name__ == "__main__":
         usuario=args.usuario,
         password=args.password,
         ca_certs=ca_certs,
-        pedir_login=args.login,
+        pedir_login=True,
     )
     app.iniciar()

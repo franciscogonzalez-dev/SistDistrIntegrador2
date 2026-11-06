@@ -1,106 +1,44 @@
-# Autenticación y Autorización con JSON Web Tokens (JWT)
+# Sesion del despachador con JWT
 
-> **Módulo:** Proyecto 2 - Sistemas Distribuidos (UNPSJB)  
-> **Estándar:** RFC 7519 / RFC 7515  
-> **Algoritmo de Firma:** HMAC-SHA256 (`HS256`)
+## Que es y que no es
+El despachador pide usuario y clave al abrir, y mantiene la sesion con un JWT (RFC 7519, HS256) que dura 1 hora. Si vence, no deja asignar ni liberar hasta que el operador vuelva a iniciar sesion, sin cerrar la app.
 
----
+**Es un control local de la app, no un control de seguridad del sistema.** El token no viaja por MQTT y el servicio no lo valida. Lo que impide que alguien actue en nombre de otro sigue siendo lo de siempre:
+* El broker autentica el usuario y la clave de MQTT (#6).
+* La ACL solo deja publicar en `comandos/${username}/+/+`, asi que el despachador del topico es el usuario autenticado.
+* El servicio saca la identidad del topico, nunca del payload (`docs/topics.md`). El payload de `comandos` no cambia.
 
-## 1. Motivación y Arquitectura
+### Por que no viaja en los comandos
+Con HS256 la misma clave firma y verifica. Para que el despachador emita el token tendria que tener la clave, y entonces podria firmar cualquier `sub`: el servicio no aprenderia nada que la ACL no le garantice ya. Ademas, un comando puede esperar hasta 24 h en la sesion persistente del servicio (`docs/topics.md`), mas que lo que dura el token, y se rechazaria al llegar.
 
-En este proyecto, los componentes distribuidos (unidades de emergencia, servicio central y despachador) se comunican a través de un broker MQTT seguro con TLS y control de acceso (ACL).
+Si hiciera falta validarlo en el servicio, el token lo tiene que emitir un componente que no sea el despachador (por ejemplo el servicio, con un topico y una regla de ACL nuevos), y el despachador no tiene que tener la clave.
 
-Para complementar la seguridad a nivel de transporte y protocolo (TLS + credenciales MQTT por usuario/rol), se incorporó **JWT (JSON Web Tokens)** en la capa de aplicación:
-1. **Inicio de Sesión del Operador:** El despachador solicita credenciales de operador antes de iniciar la jornada operativa.
-2. **Generación de Token Firmado (HS256):** Al validar la identidad contra las credenciales autorizadas, se expide un token JWT autocontenido con los roles y permisos del despachador.
-3. **Control de Autorización Local:** Antes de ejecutar acciones sensibles (asignar móviles a incidentes o liberar móviles), la interfaz verifica criptográficamente que el operador tenga un token activo y no expirado.
-4. **Propagación Distribuida del Token por MQTT:** Las órdenes publicadas en `comandos/desp-01/{tipo}/{unidad}` viajan con el token JWT adjunto en el payload JSON.
-5. **Validación en el Servicio Central:** El servicio central valida la firma y el tiempo de vida del JWT antes de registrar o delegar la orden.
+## Como funciona
+| Paso | Donde | Que hace |
+|------|-------|----------|
+| Login | `DialogoLogin` (`clientes/despachador.py`) | Pide usuario y clave. No la precarga |
+| Validacion | `autenticar_despachador` (`clientes/credenciales.py`) | Solo usuarios `desp-*`. Compara contra `--password` o, si no se paso, contra `clientes/credenciales.json`. Nunca contra `credenciales.example.json` |
+| Emision y verificacion | `comun/jwt_auth.py` | Firma con una clave aleatoria generada al abrir la app, que queda solo en memoria. Rechaza otro algoritmo que no sea HS256, y exige `exp` e `iss` |
+| Vencimiento | `_verificar_autorizacion_jwt` | Antes de asignar o liberar revisa el token; si vencio pide login de nuevo con el mismo usuario |
+| Indicador | badge de la barra superior | Se revisa cada 30 s y pasa de "JWT Activo" a "JWT Vencido" |
 
----
+La clave de la conexion MQTT la sigue validando el broker: si la del login no coincide con la de EMQX, la app abre pero no conecta.
 
-## 2. Estructura del Token JWT
+## Claims
+| Claim | Ejemplo | Descripcion |
+|-------|---------|-------------|
+| `sub` | `"desp-01"` | Operador de la sesion |
+| `rol` | `"despachador"` | Rol del operador |
+| `permisos` | `["despacho:asignar", "despacho:liberar", "monitoreo:ver"]` | Informativo: hoy no se chequea |
+| `iat` | `1730851200` | Emision, en segundos Unix |
+| `exp` | `1730854800` | Vencimiento, 1 hora despues |
+| `iss` | `"SistDistr-CentroDespacho"` | Emisor, tiene que coincidir |
+| `jti` | `"c9d8a4f1-..."` | Id del token, para trazabilidad. No previene replay: no se guarda en ningun lado |
 
-El token sigue el formato estándar `header.payload.signature` codificado en **Base64URL**:
+## Como mostrarlo en la demo
+1. `py clientes/despachador.py` e iniciar sesion con `desp-01` y la clave de `clientes/credenciales.json`.
+2. Hacer clic en el badge de la barra superior para ver los claims y el tiempo restante.
+3. "Copiar Token para jwt.io" permite pegarlo en jwt.io para ver como se decodifica. La firma no se puede comprobar ahi: la clave no sale de la app, y no se pega ninguna clave en un sitio externo.
 
-### Encabezado (Header)
-```json
-{
-  "alg": "HS256",
-  "typ": "JWT"
-}
-```
-
-### Claims (Payload)
-| Claim | Nombre estándar | Ejemplo | Descripción |
-|---|---|---|---|
-| `sub` | Subject | `"desp-01"` | Identificador único del operador autenticado |
-| `rol` | Custom Claim | `"despachador"` | Rol operativo del usuario |
-| `permisos` | Custom Claim | `["despacho:asignar", "despacho:liberar", "monitoreo:ver"]` | Lista de acciones permitidas |
-| `iat` | Issued At | `1730851200` | Timestamp Unix del momento de emisión |
-| `exp` | Expiration Time | `1730854800` | Timestamp Unix de caducidad (1 hora por defecto) |
-| `iss` | Issuer | `"SistDistr-CentroDespacho"` | Entidad emisora del token |
-| `jti` | JWT ID | `"c9d8a4f1-..."` | UUID único del token para prevenir ataques de replay y trazabilidad |
-
-### Firma (Signature)
-Calculada mediante HMAC-SHA256 sobre `Base64URL(Header) + "." + Base64URL(Payload)` utilizando la clave secreta compartida (`JWT_SECRET`).
-
----
-
-## 3. Módulos y Modificaciones Realizadas
-
-### A. Núcleo JWT (`comun/jwt_auth.py`)
-- Implementación completa en Python estándar (`hmac`, `hashlib`, `base64`, `json`, `time`), sin requerir librerías externas obligatorias (100% portable y compatible con PyJWT y jwt.io).
-- Funciones principales:
-  - `generar_token(...)`: Crea y firma el token con los claims correspondientes.
-  - `verificar_token(...)`: Comprueba firma criptográfica, vigencia temporal (`exp`) y estructura.
-  - `autenticar_despachador(usuario, password)`: Valida las credenciales contra `clientes/credenciales.json` y emite el token.
-  - `decodificar_sin_verificar(...)`: Permite inspeccionar los claims para visualización en pantalla.
-
-### B. Ventana de Login y Sesión en el Despachador (`clientes/despachador.py`)
-- **Diálogo Modal de Login (`DialogoLogin`):** Se muestra al arrancar el despachador de forma interactiva. Permite ingresar usuario y contraseña.
-- **Indicador de Sesión Activa:** En la barra superior se añadió un botón/badge:
-  `🔑 desp-01 (JWT Activo 🟢)`
-- **Inspector de Token JWT:** Al hacer clic en el badge, se abre una ventana modal con:
-  - Token compacto en Base64URL.
-  - Botón **"Copiar Token para jwt.io"** para pegarlo en vivo durante la defensa.
-  - Claims decodificados (JSON) y tiempo restante de expiración.
-- **Validación previa a despachar:** En `asignar_unidad()` y `liberar_unidad()`, el despachador valida su token antes de publicar la orden.
-- **Comandos enriquecidos:** El comando MQTT incluye el campo `"jwt": self.token_jwt`.
-
-### C. Contrato de Payloads (`comun/payloads.py`)
-- El esquema `COMANDO` acepta opcionalmente `"jwt": (_texto, False)`, manteniendo total retrocompatibilidad con clientes o pruebas existentes.
-
-### D. Verificación en el Servicio Central (`servicio/src/handlers/comandos.py`)
-- Al recibir una orden en `comandos/+/+/+`, si el payload contiene un token JWT, el servicio valida la firma y el operador emisor, registrándolo en los logs del sistema.
-
----
-
-## 4. Guía para Demostración y Defensa
-
-### 1. Iniciar con Login Interactivo
-Ejecutar el despachador:
-```bash
-py clientes/despachador.py
-```
-Aparecerá la ventana de inicio de sesión. Iniciar con:
-- **Usuario:** `desp-01`
-- **Contraseña:** `Desp#Cr2026.00!` (la registrada en `clientes/credenciales.json`)
-
-### 2. Inspeccionar el Token en Vivo
-1. Hacer clic en el badge verde `🔑 desp-01 (JWT Activo 🟢)` en la barra superior.
-2. Observar los claims (`sub`, `rol`, `permisos`, `exp`, `jti`).
-3. Hacer clic en **"Copiar Token para jwt.io"**.
-4. Abrir en el navegador [https://jwt.io](https://jwt.io) y pegar el token: se verá exactamente la misma estructura y firma válida con la clave secreta.
-
-### 3. Ejecutar la Suite de Pruebas Automatizadas
-Para demostrar la robustez y cobertura de pruebas:
-```bash
-py -m unittest discover -s pruebas
-```
-Se ejecutan 25 pruebas unitarias, incluyendo:
-- Verificación de firma y estructura.
-- Rechazo de tokens expirados (`TokenExpirado`).
-- Detección de firmas adulteradas (`FirmaInvalida`).
-- Autenticación correcta y fallida de credenciales.
-- Inclusión del JWT en las órdenes de despacho.
+## Pruebas
+`py -m unittest discover pruebas`. Las de este modulo estan en `pruebas/test_jwt.py` y no necesitan `credenciales.json`.

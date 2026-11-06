@@ -95,7 +95,6 @@ COMANDO = {
     "ts": (_numero, True),
     "accion": (_uno_de(ACCIONES), True),
     "eid": (_texto, False), #obligatorio si accion es asignar, se chequea en validar
-    "jwt": (_texto, False), #opcional: token JWT de autenticación/autorización
 }
 
 PEDIDO = {
@@ -202,8 +201,8 @@ def presencia(estado, ts=None):
     return _armar(PRESENCIA, estado=estado, ts=ts)
 
 
-def comando(accion, eid=None, id=None, ts=None, jwt=None):
-    return _armar(COMANDO, id=id or nuevo_id(), ts=ts or ahora(), accion=accion, eid=eid, jwt=jwt)
+def comando(accion, eid=None, id=None, ts=None):
+    return _armar(COMANDO, id=id or nuevo_id(), ts=ts or ahora(), accion=accion, eid=eid)
 
 
 def pedido(lat, lon, id=None, ts=None):
