@@ -2,6 +2,7 @@
 # El receptor tiene las suyas en receptor/requirements.txt (se instalan en su container).
 paho-mqtt>=2.0.0,<3
 tkintermapview>=1.29,<2
+PyJWT>=2.8.0,<3
 
 # Solo para regenerar las rutas (clientes/rutas/generar_rutas.py)
 requests>=2.28.0,<3
