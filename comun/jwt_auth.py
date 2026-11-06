@@ -1,23 +1,21 @@
-"""Módulo de autenticación y gestión de JSON Web Tokens (JWT).
-Proyecto 2 - Sistemas Distribuidos (UNPSJB)
+"""JWT de la sesion local del despachador (RFC 7519, HS256, solo biblioteca estandar).
 
-Implementa la especificación RFC 7519 con algoritmo HMAC-SHA256 (HS256)
-utilizando únicamente la biblioteca estándar de Python (hmac, hashlib, base64, json).
-Es completamente autocontenido, sin dependencias externas obligatorias,
-e interoperable con librerías como PyJWT y visores web como jwt.io.
+El token vive en la app del despachador: no viaja por MQTT y el servicio no lo valida.
+La identidad de quien publica sigue saliendo del topico y de la ACL (docs/topics.md, docs/jwt.md).
 """
 
-import os
+import math
 import time
 import json
 import hmac
 import uuid
 import base64
+import secrets
 import hashlib
-from pathlib import Path
 
-# Clave secreta para firmar y validar tokens (definible por entorno o fallback seguro de desarrollo)
-JWT_SECRET_DEFAULT = os.getenv("JWT_SECRET", "SistDistr2026_Emergencias_JWT_SecretKey_9918273645")
+#clave aleatoria por proceso, solo en memoria: no hay nada que configurar ni que se pueda filtrar por el repo
+#un token solo es valido en la app que lo emitio y deja de serlo al cerrarla
+_SECRETO_PROCESO = secrets.token_urlsafe(32)
 JWT_ALGORITMO = "HS256"
 EXPIRACION_DEFAULT_SEG = 3600  # 1 hora de validez por defecto
 EMISOR_DEFAULT = "SistDistr-CentroDespacho"
@@ -88,7 +86,7 @@ def generar_token(
     - jti (JWT ID): Identificador único del token para trazabilidad
     """
     if secreto is None:
-        secreto = JWT_SECRET_DEFAULT
+        secreto = _SECRETO_PROCESO
 
     ahora = int(time.time())
     if permisos is None:
@@ -139,7 +137,7 @@ def verificar_token(token: str, secreto: str = None) -> dict:
     Lanza TokenInvalido, TokenExpirado o FirmaInvalida si falla.
     """
     if secreto is None:
-        secreto = JWT_SECRET_DEFAULT
+        secreto = _SECRETO_PROCESO
 
     if not token or not isinstance(token, str):
         raise TokenInvalido("El token proporcionado no es un string válido")
@@ -172,9 +170,13 @@ def verificar_token(token: str, secreto: str = None) -> dict:
     # 3. Validar expiración (exp)
     ahora = int(time.time())
     exp = payload.get("exp")
-    if exp is not None:
-        if not isinstance(exp, (int, float)) or ahora > exp:
-            raise TokenExpirado(f"El token ha expirado en {exp} (hora actual: {ahora})")
+    if isinstance(exp, bool) or not isinstance(exp, (int, float)) or not math.isfinite(exp):
+        raise TokenInvalido("Claim exp ausente o inválido")
+    if ahora >= exp:
+        raise TokenExpirado(f"El token ha expirado en {exp} (hora actual: {ahora})")
+
+    if payload.get("iss") != EMISOR_DEFAULT:
+        raise TokenInvalido("Emisor no reconocido")
 
     return payload
 
@@ -192,56 +194,3 @@ def decodificar_sin_verificar(token: str) -> tuple[dict, dict]:
     header = json.loads(_b64url_decode(partes[0]).decode("utf-8"))
     payload = json.loads(_b64url_decode(partes[1]).decode("utf-8"))
     return header, payload
-
-
-# ==============================================================================
-# AUTENTICACIÓN DE USUARIOS (CREDENCIALES -> JWT)
-# ==============================================================================
-
-def autenticar_despachador(
-    usuario: str,
-    password: str,
-    secreto: str = None,
-    expiracion_segundos: int = EXPIRACION_DEFAULT_SEG,
-) -> tuple[str, dict]:
-    """
-    Autentica al operador del despachador contra clientes/credenciales.json.
-    Si las credenciales coinciden, genera y devuelve (token_jwt, claims).
-    Si fallan, lanza ValueError.
-    """
-    from pathlib import Path
-    
-    # Buscar credenciales.json en el directorio clientes
-    raiz = Path(__file__).resolve().parent.parent
-    archivo_credenciales = raiz / "clientes" / "credenciales.json"
-    
-    # Fallback si aún no se creó credenciales.json: leer credenciales.example.json o validar por defecto
-    if not archivo_credenciales.exists():
-        archivo_ejemplo = raiz / "clientes" / "credenciales.example.json"
-        if archivo_ejemplo.exists():
-            archivo_credenciales = archivo_ejemplo
-        else:
-            raise ValueError("No se encontró el archivo de credenciales de clientes")
-
-    try:
-        with open(archivo_credenciales, encoding="utf-8") as f:
-            credenciales = json.load(f)
-    except Exception as e:
-        raise ValueError(f"Error al leer credenciales: {e}") from e
-
-    clave_esperada = credenciales.get(usuario)
-    if clave_esperada is None:
-        raise ValueError(f"Usuario desconocido: '{usuario}'")
-
-    if clave_esperada != password:
-        raise ValueError("Contraseña incorrecta")
-
-    # Credenciales válidas: emitir token
-    token = generar_token(
-        usuario=usuario,
-        rol="despachador",
-        expiracion_segundos=expiracion_segundos,
-        secreto=secreto,
-    )
-    claims = verificar_token(token, secreto=secreto)
-    return token, claims
