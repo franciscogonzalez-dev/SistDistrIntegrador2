@@ -34,6 +34,26 @@ class TestRouterServicio(unittest.TestCase):
         # No debe lanzar excepciones
         self.servicio._on_posicion(None, None, msg)
 
+    def test_on_posicion_valida_guarda_y_publica_flota(self):
+        # Una excepción acá mataría el hilo de paho: el router tiene que llegar bien hasta el handler
+        self.servicio.cliente = MagicMock()
+        payload_bytes = payloads.posicion(lat=-45.864, lon=-67.485, rumbo=180)
+        msg = FakeMessage("reportes/ambulancia/amb-01/posicion", payload_bytes)
+
+        self.servicio._on_posicion(None, None, msg)
+
+        self.assertEqual(self.servicio.bd.leer_unidad("amb-01")["lat"], -45.864)
+        self.assertEqual(self.servicio.cliente.publish.call_args.kwargs["topic"], "flota/ambulancia/amb-01/estado")
+
+    def test_on_posicion_invalida_publica_alerta(self):
+        self.servicio.cliente = MagicMock()
+        msg = FakeMessage("reportes/ambulancia/amb-01/posicion", b"no es json")
+
+        self.servicio._on_posicion(None, None, msg)
+
+        self.assertEqual(self.servicio.cliente.publish.call_args.kwargs["topic"], "alertas/ambulancia")
+        self.assertIsNone(self.servicio.bd.leer_unidad("amb-01"))
+
     def test_on_presencia_valida(self):
         payload_bytes = payloads.presencia("online")
         msg = FakeMessage("reportes/policia/pol-03/presencia", payload_bytes)
