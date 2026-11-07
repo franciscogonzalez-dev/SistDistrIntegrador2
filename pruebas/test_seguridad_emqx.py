@@ -134,7 +134,7 @@ def probar_subscripcion(cliente, topic, qos=1):
     return False, resp["codigo"]
 
 
-def probar_publicacion(cliente, topic, payload="{}", qos=1):
+def probar_publicacion(cliente, topic, payload="{}", qos=1, retain=False):
     """
     Prueba si el broker acepta publicar (devuelve True si recibe PUBACK de éxito,
     False si no es autorizado o falla con reason_code >= 128).
@@ -148,7 +148,7 @@ def probar_publicacion(cliente, topic, payload="{}", qos=1):
             resp["publicado"] = True
 
     cliente.on_publish = on_publish
-    msg_info = cliente.publish(topic, payload, qos=qos)
+    msg_info = cliente.publish(topic, payload, qos=qos, retain=retain)
     try:
         msg_info.wait_for_publish(timeout=2)
         # Si wait_for_publish no lanzó excepción y el reason_code es menor a 128
@@ -230,6 +230,10 @@ def ejecutar_pruebas():
     ok, cod = probar_publicacion(cli_pub, f"pedidos/{cid_pub}/bomberos")
     registrar_resultado(f"Público publica en pedidos/{cid_pub}/bomberos (${{clientid}})", ok, f"codigo={cod}")
 
+    # Un pedido retenido se le volvería a entregar al servicio en cada reconexión
+    ok, cod = probar_publicacion(cli_pub, f"pedidos/{cid_pub}/bomberos", retain=True)
+    registrar_resultado("Público publicando un pedido retenido denegado", not ok, f"permitido={ok}")
+
     # Intento de publicar haciéndose pasar por otro clientid
     otro_cid = "publico-999e8400e29b41d4a716446655449999"
     ok, cod = probar_publicacion(cli_pub, f"pedidos/{otro_cid}/bomberos")
@@ -265,6 +269,13 @@ def ejecutar_pruebas():
     ok, cod = probar_publicacion(cli_amb, "reportes/ambulancia/amb-01/presencia")
     registrar_resultado("amb-01 publica su propia presencia concedido", ok, f"codigo={cod}")
 
+    # La presencia es el único topic de entrada que lleva retained (docs/topics.md)
+    ok, cod = probar_publicacion(cli_amb, "reportes/ambulancia/amb-01/presencia", '{"v":1,"estado":"offline"}', retain=True)
+    registrar_resultado("amb-01 publica su presencia retenida concedido", ok, f"codigo={cod}")
+
+    ok, cod = probar_publicacion(cli_amb, "reportes/ambulancia/amb-01/posicion", retain=True)
+    registrar_resultado("amb-01 publicando una posicion retenida denegado", not ok, f"permitido={ok}")
+
     # Intento de publicar posición de otra ambulancia
     ok, cod = probar_publicacion(cli_amb, "reportes/ambulancia/amb-02/posicion")
     registrar_resultado("amb-01 publicando posicion de amb-02 denegado", not ok, f"permitido={ok}")
@@ -292,6 +303,9 @@ def ejecutar_pruebas():
     # Publicar comandos con su propio usuario
     ok, cod = probar_publicacion(cli_desp, "comandos/desp-01/ambulancia/amb-01")
     registrar_resultado("desp-01 publica comandos/desp-01/ambulancia/amb-01 concedido", ok, f"codigo={cod}")
+
+    ok, cod = probar_publicacion(cli_desp, "comandos/desp-01/ambulancia/amb-01", retain=True)
+    registrar_resultado("desp-01 publicando un comando retenido denegado", not ok, f"permitido={ok}")
 
     # Intento de publicar comandos en nombre de otro despachador
     ok, cod = probar_publicacion(cli_desp, "comandos/desp-02/ambulancia/amb-01")

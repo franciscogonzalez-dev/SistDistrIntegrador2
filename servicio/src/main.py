@@ -74,16 +74,13 @@ class ServicioCentral:
             logger.exception("Error al instanciar la base de datos: %s", e)
             raise #sin bd el servicio no funciona
         
-        # Validación del certificado de CA si se usa TLS
+        # Sin TLS solo si se pide explícitamente (ca_certs=None, --no-tls): si falta el certificado
+        # se corta acá, en vez de mandar la clave en texto plano sin avisar
         ca_file = None
         if ca_certs:
-            if not Path(ca_certs).exists():
-                logger.warning(
-                    "No se encontró el certificado CA en '%s'. Si se prueba sin TLS use --no-tls",
-                    ca_certs,
-                )
-            else:
-                ca_file = str(ca_certs)
+            if not Path(ca_certs).is_file():
+                raise SystemExit(f"No existe el certificado de la CA: {ca_certs} (para probar sin TLS: --no-tls)")
+            ca_file = str(ca_certs)
 
         # 1. Instanciar cliente MQTT base (comun/publisher.py)
         # Se configura sesión persistente de 24 h para que EMQX retenga comandos y pedidos
@@ -225,11 +222,14 @@ if __name__ == "__main__":
     parser.add_argument("--broker", type=str, default=None, help="IP o host del broker MQTT")
     parser.add_argument("--puerto", type=int, default=None, help="Puerto del broker (8883 TLS / 1883 plano)")
     parser.add_argument("--usuario", type=str, default=entorno["usuario"] or USUARIO_DEFAULT, help="Usuario MQTT")
-    parser.add_argument("--password", type=str, default=entorno["password"] or "cambiar", help="Contraseña MQTT")
+    parser.add_argument("--password", type=str, default=entorno["password"], help="Contraseña MQTT (por defecto, MQTT_PASSWORD)")
     parser.add_argument("--ca-certs", type=str, default=entorno["ca_certs"] or CA_CERTS_DEFAULT, help="Ruta al ca.crt")
     parser.add_argument("--no-tls", action="store_true", help="Desactivar TLS y conectar en texto plano (puerto 1883)")
 
     args = parser.parse_args()
+
+    if not args.password:
+        parser.error("falta la clave del broker: definir MQTT_PASSWORD o pasar --password")
 
     broker = args.broker or args.pos_broker or entorno["ip_broker"]
     if args.no_tls:
