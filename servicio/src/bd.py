@@ -81,6 +81,28 @@ class BD:
         select * from emergencias where eid = ?
     """
 
+    CREAR_EMERGENCIA = """
+        insert into emergencias (eid, tipo, lat, lon, ts, unidad)
+        values (?, ?, ?, ?, ?, null)
+    """
+
+    ASIGNAR_EMERGENCIA = """
+        update emergencias set unidad = ? where eid = ?
+    """
+
+    CERRAR_EMERGENCIA = """
+        delete from emergencias where eid = ?
+    """
+
+    SIGUIENTE_EID_NUM = """
+        select coalesce(max(num), 0) + 1 from (
+            select cast(replace(replace(eid, 'E-', ''), 'E', '') as integer) as num from emergencias
+            union all
+            select cast(replace(replace(resultado, 'E-', ''), 'E', '') as integer) as num
+            from pedidos_comandos_procesados where clase = 'pedido'
+        ) as t
+    """
+
     LEER_PEDIDOS_COMANDOS_PROCESADOS ="""
         select * from pedidos_comandos_procesados where id_procesado = ? and clase = ? and origen =?
     """
@@ -179,6 +201,38 @@ class BD:
             return self._conn.execute(BD.LEER_EMERGENCIA, (eid,)).fetchone()
         except sqlite3.Error as e:
             logger.exception("Error al leer la emergencia: %s", e)
+            raise
+
+    def crear_emergencia(self, eid, tipo, lat, lon, ts):
+        try:
+            self._conn.execute(BD.CREAR_EMERGENCIA, (eid, tipo, lat, lon, ts))
+        except sqlite3.Error as e:
+            logger.exception("No se pudo crear la emergencia %s: %s", eid, e)
+            raise
+
+    def asignar_emergencia(self, eid, unidad):
+        try:
+            self._conn.execute(BD.ASIGNAR_EMERGENCIA, (unidad, eid))
+        except sqlite3.Error as e:
+            logger.exception("No se pudo asignar la unidad %s a la emergencia %s: %s", unidad, eid, e)
+            raise
+
+    def cerrar_emergencia(self, eid):
+        try:
+            self._conn.execute(BD.CERRAR_EMERGENCIA, (eid,))
+        except sqlite3.Error as e:
+            logger.exception("No se pudo cerrar la emergencia %s: %s", eid, e)
+            raise
+
+    def generar_siguiente_eid(self):
+        try:
+            cursor = self._conn.cursor()
+            cursor.execute(BD.SIGUIENTE_EID_NUM)
+            fila = cursor.fetchone()
+            siguiente = fila[0] if fila and fila[0] is not None else 1
+            return f"E{siguiente}"
+        except sqlite3.Error as e:
+            logger.exception("Error al generar siguiente eid: %s", e)
             raise
     
     def leer_id_procesado(self, clase, origen, id_procesado):
