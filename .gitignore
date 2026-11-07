@@ -76,3 +76,6 @@ ENV/
 *.swo
 .DS_Store
 Thumbs.db
+
+
+clientes/despachos.txt

@@ -49,6 +49,33 @@ from credenciales import clave
 
 CA_CERTS_DEFAULT = str(ROOT_DIR / "broker" / "certs" / "ca.crt")
 USUARIO_DEFAULT = "desp-01"
+ARCHIVO_DESPACHOS = CLIENTES_DIR / "despachos.txt"
+
+def registrar_despacho_archivo(id_unidad, orden):
+    """
+    Actualiza la orden para 'id_unidad' en clientes/despachos.txt:
+    orden: f"{lat} {lon} {eid}" o "volver"
+    """
+    try:
+        lineas = []
+        encontrado = False
+        nueva_linea = f"{id_unidad} {orden}".strip() + "\n"
+        if ARCHIVO_DESPACHOS.exists():
+            with open(ARCHIVO_DESPACHOS, "r", encoding="utf-8") as f:
+                for l in f:
+                    partes = l.strip().split()
+                    if partes and partes[0] == id_unidad:
+                        lineas.append(nueva_linea)
+                        encontrado = True
+                    elif l.strip():
+                        lineas.append(l)
+        if not encontrado:
+            lineas.append(nueva_linea)
+
+        with open(ARCHIVO_DESPACHOS, "w", encoding="utf-8") as f:
+            f.writelines(lineas)
+    except Exception as e:
+        print(f"[Despachador] Error actualizando {ARCHIVO_DESPACHOS.name}: {e}")
 
 # Sesión persistente de 1 h: guarda alertas y respuestas si se cierra la app (docs/topics.md)
 EXPIRACION_SESION_SEG = 3600
@@ -122,6 +149,10 @@ class DespachadorBasico:
         # Mapeo de idempotencia de comandos sin respuesta todavía (se borra al responder el servicio):
         # { "asignar:amb-01:E-01": "uuid-...", "liberar:amb-01": "uuid-..." }
         self.comandos_ids = {}
+
+        # Órdenes esperando la respuesta del servicio: solo se escriben en despachos.txt si las acepta
+        # { "uuid-...": ("amb-01", "-45.86 -67.49 E-01") }
+        self.despachos_pendientes = {}
 
         # Historial de alertas y respuestas para la pestaña de registro
         self.historial_eventos = deque(maxlen=100)
@@ -906,6 +937,13 @@ class DespachadorBasico:
 
         ok = self.cliente.publish(payload, topic=topico, qos=1, retain=False)
         if ok:
+            # Se escribe en clientes/despachos.txt cuando el servicio confirma (procesar_respuesta)
+            info_em = self.emergencias.get(eid, {})
+            lat_em = info_em.get("lat")
+            lon_em = info_em.get("lon")
+            if lat_em is not None and lon_em is not None:
+                self.despachos_pendientes[cmd_id] = (id_unidad, f"{lat_em} {lon_em} {eid}")
+
             msg = f"🚀 Comando 'asignar' enviado: {id_unidad} -> {eid} (ID: {cmd_id[:8]}...)"
             print(f"[*] [Comando Asignar] {id_unidad} -> {eid} (ID: {cmd_id[:8]}...) en {topico}")
             self.registrar_evento(msg, tag="info")
@@ -932,6 +970,9 @@ class DespachadorBasico:
 
         ok = self.cliente.publish(payload, topic=topico, qos=1, retain=False)
         if ok:
+            # Se escribe en clientes/despachos.txt cuando el servicio confirma (procesar_respuesta)
+            self.despachos_pendientes[cmd_id] = (id_unidad, "volver")
+
             msg = f"🔓 Comando 'liberar' enviado para {id_unidad} (ID: {cmd_id[:8]}...)"
             print(f"[*] [Comando Liberar] {id_unidad} (ID: {cmd_id[:8]}...) en {topico}")
             self.registrar_evento(msg, tag="info")
@@ -959,6 +1000,10 @@ class DespachadorBasico:
             desc += f" | Incidente: {eid}"
 
         self.registrar_evento(desc, tag="alerta")
+
+        # El servicio ya la desasignó: si no, al volver la unidad releería su orden vieja del archivo
+        if motivo == "unidad_desconectada" and unidad:
+            registrar_despacho_archivo(unidad, "volver")
 
         # Alerta visible cuando se cae una unidad ocupada
         if motivo == "unidad_desconectada" and eid:
@@ -996,10 +1041,15 @@ class DespachadorBasico:
         """
         Procesa respuestas/{despachador}:
         - Muestra visiblemente los comandos rechazados con su motivo.
+        - Si el servicio aceptó la orden, la escribe en clientes/despachos.txt para la unidad.
         """
         cmd_id = datos.get("id", "desconocido")
         ok = datos.get("ok", False)
         motivo = datos.get("motivo", "Sin detalle especificado")
+
+        pendiente = self.despachos_pendientes.pop(cmd_id, None)
+        if ok and pendiente:
+            registrar_despacho_archivo(*pendiente)
 
         # La acción ya tuvo respuesta: repetirla es una acción nueva y lleva otro id.
         # Con el mismo id el servicio la tomaría como duplicado y no la aplicaría (docs/topics.md, Idempotencia)
