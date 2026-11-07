@@ -13,6 +13,8 @@ Dos modos de ejecución:
   python clientes/publico.py                    → modo civil (ubicación fija, transparente)
   python clientes/publico.py --prueba           → modo demo (selector de 10 puntos de Comodoro)
 
+Cada instancia abierta a la vez necesita su propio Client ID: python clientes/publico.py --perfil 2
+
 La clave se lee de clientes/credenciales.json (ver credenciales.example.json).
 Host, puerto y CA se pueden pasar por argumento o por las variables MQTT_HOST, MQTT_PORT y MQTT_CA_CERTS.
 """
@@ -20,13 +22,14 @@ Host, puerto y CA se pueden pasar por argumento o por las variables MQTT_HOST, M
 import sys
 import re
 import uuid
+import time
 import queue
 import argparse
 import logging
 from pathlib import Path
 from datetime import datetime
 import tkinter as tk
-from tkinter import ttk
+from tkinter import messagebox, ttk
 
 # Asegurar que la raíz del proyecto y 'clientes' estén en el path
 ROOT_DIR = Path(__file__).resolve().parent.parent
@@ -49,6 +52,18 @@ ARCHIVO_CLIENT_ID = CLIENTES_DIR / ".client_id_publico"
 LAT_DEFAULT = -45.8641
 LON_DEFAULT = -67.4850
 
+# Tocar otra vez el mismo pedido sin confirmar, o hasta este tiempo después de confirmado,
+# no es una emergencia nueva: un doble clic no tiene que mandar dos unidades
+VENTANA_REPETICION_SEG = 30.0
+# Si tras conectar no llega servicio/estado (sin retained: el servicio nunca arrancó), se avisa igual
+ESPERA_ESTADO_MS = 5000
+# PUBACK "No matching subscribers": no es un error de MQTT, pero el pedido no le llegó a nadie.
+# Pasa si el servicio nunca arrancó en este broker, porque todavía no tiene sesión persistente
+RC_SIN_SUSCRIPTORES = 16
+
+NOMBRES_TIPO = {"policia": "Policía", "ambulancia": "Ambulancia", "bomberos": "Bomberos"}
+TELEFONOS = "📞 107 (Salud)  📞 101 (Policía)  📞 100 (Bomberos)"
+
 # Puntos de prueba para la demo (--prueba): lugares reales de Comodoro + casos borde
 PUNTOS_PRUEBA = [
     ("📍 Centro (San Martín y Rivadavia)",        -45.8641, -67.4850),
@@ -68,18 +83,24 @@ PUNTOS_PRUEBA = [
 # Persistencia del Client ID (simula el id del celular)
 # ─────────────────────────────────────────────────────────────────────
 
-def obtener_client_id():
+def obtener_client_id(perfil=None):
     """Lee el client_id guardado o genera uno nuevo y lo persiste.
 
     Formato: publico-<32 hex> (requerido por el autenticador cinfo de EMQX).
+    Cada perfil simula otro celular: dos instancias con el mismo Client ID
+    se echarían entre sí del broker.
     """
-    if ARCHIVO_CLIENT_ID.exists():
-        guardado = ARCHIVO_CLIENT_ID.read_text().strip()
+    archivo = ARCHIVO_CLIENT_ID
+    if perfil is not None:
+        archivo = archivo.with_name(f"{archivo.name}_{perfil}")
+
+    if archivo.exists():
+        guardado = archivo.read_text().strip()
         if re.fullmatch(r"publico-[0-9a-fA-F]{32}", guardado):
             return guardado
 
     nuevo = f"publico-{uuid.uuid4().hex}"
-    ARCHIVO_CLIENT_ID.write_text(nuevo)
+    archivo.write_text(nuevo)
     logger.info("Client ID generado: %s", nuevo)
     return nuevo
 
@@ -137,13 +158,15 @@ class AppPublico(MQTTPub):
         self._cola_ui = queue.Queue()
         self._cerrando = False
         self._after_id = None
+        self._after_estado = None
         self.root = None
 
         # Estado interno
         self.estado_servicio = "desconocido"
         self.estado_red = "conectando"
-        self.ultimo_pedido_id = None
-        self.ultimo_pedido_tipo = None
+        self.ultimo_pedido = None
+        self._pedidos_recientes = {}   # (tipo, lat, lon) -> pedido, para reconocer toques repetidos
+        self._pendientes = {}          # mid -> pedido publicado todavía sin PUBACK
         self.lat_actual = LAT_DEFAULT
         self.lon_actual = LON_DEFAULT
 
@@ -159,6 +182,8 @@ class AppPublico(MQTTPub):
             sesion_persistente=False,
             ca_certs=ca_certs,
         )
+
+        self._client.on_connect_fail = self._on_connect_fail
 
         # Suscripción a servicio/estado (único topic que el público puede leer)
         self.subscribe(topics.SERVICIO_ESTADO, callback=self._on_servicio_estado, qos=1)
@@ -184,6 +209,19 @@ class AppPublico(MQTTPub):
             self._cola_ui.put(("red", "sin_red"))
             # Si el broker se cae, el servicio también está inalcanzable
             self._cola_ui.put(("banner", "offline"))
+
+    def _on_connect_fail(self, client, userdata):
+        """paho avisa por acá si no llega a conectar (broker caído, red, TLS): no pasa por _on_connect."""
+        if not self._cerrando:
+            self._cola_ui.put(("red", "sin_red"))
+            self._cola_ui.put(("banner", "offline"))
+
+    def _on_publish(self, client, userdata, mid, reason_code, properties):
+        """PUBACK del broker: recién acá se sabe que el pedido llegó (hilo MQTT → cola → hilo UI)."""
+        super()._on_publish(client, userdata, mid, reason_code, properties)
+        if not self._cerrando:
+            perdido = reason_code.is_failure or reason_code.value == RC_SIN_SUSCRIPTORES
+            self._cola_ui.put(("puback", (mid, perdido)))
 
     def _on_servicio_estado(self, _client, _userdata, msg):
         """Callback de servicio/estado (hilo MQTT → cola → hilo UI)."""
@@ -352,46 +390,99 @@ class AppPublico(MQTTPub):
         self.lbl_coords.configure(text=self._texto_coords(lat, lon))
 
     def _enviar_pedido(self, tipo):
-        """Publica un pedido de auxilio nuevo (genera un id fresco)."""
-        self.ultimo_pedido_id = payloads.nuevo_id()
-        self.ultimo_pedido_tipo = tipo
-        self._publicar_pedido(tipo, self.ultimo_pedido_id)
+        """Publica un pedido de auxilio, salvo que sea un toque repetido del anterior."""
+        clave_pedido = (tipo, self.lat_actual, self.lon_actual)
+        anterior = self._pedidos_recientes.get(clave_pedido)
+        if anterior is not None and self._es_repeticion(anterior):
+            logger.info("Toque repetido ignorado: tipo=%s, id=%s", tipo, anterior["dato"]["id"])
+            self.ultimo_pedido = anterior
+            self._mostrar_estado_pedido()
+            return
+
+        pedido = {
+            "tipo": tipo,
+            "dato": payloads.pedido(lat=self.lat_actual, lon=self.lon_actual, id=payloads.nuevo_id()),
+            "estado": "pendiente",
+            "hora": datetime.now().strftime("%H:%M:%S"),
+            "confirmado_en": None,
+        }
+        self._pedidos_recientes[clave_pedido] = pedido
+        self._publicar_pedido(pedido)
+
+    def _es_repeticion(self, pedido):
+        if pedido["estado"] == "fallido":
+            return False
+        if pedido["estado"] == "pendiente":
+            return True
+        return time.monotonic() - pedido["confirmado_en"] < VENTANA_REPETICION_SEG
 
     def _reenviar_pedido(self):
-        """Reenvía el último pedido con el mismo id (idempotencia)."""
-        if self.ultimo_pedido_id and self.ultimo_pedido_tipo:
-            self._publicar_pedido(self.ultimo_pedido_tipo, self.ultimo_pedido_id)
+        """Reenvía el último pedido tal cual se armó: mismo id, ubicación y hora (idempotencia)."""
+        if self.ultimo_pedido:
+            self._publicar_pedido(self.ultimo_pedido)
 
-    def _publicar_pedido(self, tipo, id_pedido):
-        """Arma el payload y publica en pedidos/{clientid}/{tipo} con QoS 1."""
-        dato = payloads.pedido(
-            lat=self.lat_actual,
-            lon=self.lon_actual,
-            id=id_pedido,
-        )
-        topic = topics.pedido(self.client_id_publico, tipo)
-        ok = self.publish(dato, topic, qos=1, retain=False)
+    def _publicar_pedido(self, pedido):
+        """Publica en pedidos/{clientid}/{tipo} con QoS 1 y sigue su PUBACK."""
+        topic = topics.pedido(self.client_id_publico, pedido["tipo"])
+        self.ultimo_pedido = pedido
 
-        ahora = datetime.now().strftime("%H:%M:%S")
-        nombres = {"policia": "Policía", "ambulancia": "Ambulancia", "bomberos": "Bomberos"}
-        conectado = (self.estado_red == "conectado")
+        if self.publish(pedido["dato"], topic, qos=1, retain=False):
+            pedido["estado"] = "pendiente"
+            self._pendientes[self.ultimo_mid] = pedido
+            logger.info("Pedido publicado: tipo=%s, id=%s, topic=%s", pedido["tipo"], pedido["dato"]["id"], topic)
+        else:
+            # publish en False significa que paho no lo aceptó: no quedó en ninguna cola
+            pedido["estado"] = "fallido"
+            logger.error("Pedido perdido: tipo=%s, id=%s", pedido["tipo"], pedido["dato"]["id"])
 
-        if ok and conectado:
+        self._mostrar_estado_pedido()
+        self.btn_reenviar.pack(fill="x", pady=(8, 0), ipady=4)
+
+    def _procesar_puback(self, mid, fallo):
+        """Actualiza el pedido según el PUBACK (hilo UI, donde también se registró el mid)."""
+        pedido = self._pendientes.pop(mid, None)
+        if pedido is None:
+            return
+
+        if not fallo:
+            pedido["estado"] = "enviado"
+            pedido["confirmado_en"] = time.monotonic()
+        elif pedido["estado"] == "pendiente":
+            pedido["estado"] = "fallido"
+
+        if pedido is self.ultimo_pedido:
+            self._mostrar_estado_pedido()
+
+    def _mostrar_estado_pedido(self):
+        """Muestra el estado real del último pedido: solo el PUBACK lo da por enviado."""
+        pedido = self.ultimo_pedido
+        if pedido is None:
+            return
+
+        nombre = NOMBRES_TIPO[pedido["tipo"]]
+        if pedido["estado"] == "fallido":
             self.lbl_confirm.configure(
-                text=f"✅  Solicitud de {nombres[tipo]} enviada a las {ahora} hs.\n"
+                text=f"❌  No se pudo enviar la solicitud de {nombre}.\n"
+                     f"Probá de nuevo; si es urgente llamá:\n{TELEFONOS}",
+                fg=COLOR_OFFLINE,
+            )
+        elif pedido["estado"] == "enviado":
+            self.lbl_confirm.configure(
+                text=f"✅  Solicitud de {nombre} enviada ({pedido['hora']} hs).\n"
                      f"Tu ubicación fue adjuntada automáticamente.",
                 fg=COLOR_EXITO,
             )
-            logger.info("Pedido enviado: tipo=%s, id=%s, topic=%s", tipo, id_pedido, topic)
+        elif self.estado_red == "conectado":
+            self.lbl_confirm.configure(
+                text=f"📤  Enviando solicitud de {nombre} ({pedido['hora']} hs)…",
+                fg=COLOR_TEXTO_TENUE,
+            )
         else:
             self.lbl_confirm.configure(
-                text=f"⏳  Solicitud de {nombres[tipo]} en cola ({ahora} hs).\n"
+                text=f"⏳  Solicitud de {nombre} en cola ({pedido['hora']} hs).\n"
                      f"Se enviará automáticamente cuando se restablezca la conexión.",
                 fg=COLOR_TEXTO_TENUE,
             )
-            logger.warning("Pedido encolado (sin conexión): tipo=%s, id=%s", tipo, id_pedido)
-
-        self.btn_reenviar.pack(fill="x", pady=(8, 0), ipady=4)
 
     # ─────────────────── Actualización de la UI ───────────────────
 
@@ -400,10 +491,22 @@ class AppPublico(MQTTPub):
         self.estado_red = estado
         if estado == "conectado":
             self.lbl_red.configure(text="● Conectado", fg=COLOR_ONLINE)
-        elif estado == "sin_red":
-            self.lbl_red.configure(text="● Sin conexión", fg=COLOR_OFFLINE)
+            self._esperar_estado_servicio()
         else:
-            self.lbl_red.configure(text="● Conectando…", fg=COLOR_TEXTO_TENUE)
+            self.lbl_red.configure(text="● Sin conexión", fg=COLOR_OFFLINE)
+        self._mostrar_estado_pedido()
+
+    def _esperar_estado_servicio(self):
+        """Si no llega servicio/estado después de conectar, no se deja al ciudadano sin los teléfonos."""
+        self.estado_servicio = "desconocido"
+        if self._after_estado:
+            self.root.after_cancel(self._after_estado)
+        self._after_estado = self.root.after(ESPERA_ESTADO_MS, self._sin_estado_servicio)
+
+    def _sin_estado_servicio(self):
+        self._after_estado = None
+        if self.estado_servicio == "desconocido":
+            self._actualizar_banner("offline")
 
     def _actualizar_banner(self, estado):
         """Actualiza el cartel de estado del servicio central (hilo UI)."""
@@ -416,20 +519,13 @@ class AppPublico(MQTTPub):
                 text="Sistema central operativo",
                 fg=COLOR_ONLINE,
             )
-        elif estado == "conectando":
-            self.frame_banner.configure(bg=COLOR_PENDIENTE)
-            self.lbl_banner_icono.configure(text="🟡")
-            self.lbl_banner_texto.configure(
-                text="Conectando con el sistema central…",
-                fg=COLOR_PENDIENTE,
-            )
         else:
             self.frame_banner.configure(bg=COLOR_OFFLINE)
             self.lbl_banner_icono.configure(text="⚠️")
             self.lbl_banner_texto.configure(
                 text="El sistema está con problemas: tu pedido se\n"
                      "procesará al reconectar; si es urgente llamá:\n"
-                     "📞 107 (Salud)  📞 101 (Policía)  📞 100 (Bomberos)",
+                     f"{TELEFONOS}",
                 fg=COLOR_OFFLINE,
             )
 
@@ -448,6 +544,8 @@ class AppPublico(MQTTPub):
                 self._actualizar_red(valor)
             elif tipo_evento == "banner":
                 self._actualizar_banner(valor)
+            elif tipo_evento == "puback":
+                self._procesar_puback(*valor)
 
         self._after_id = self.root.after(100, self._poll_mqtt)
 
@@ -460,7 +558,7 @@ class AppPublico(MQTTPub):
         self._construir_gui()
 
         # Cierre limpio con la X de la ventana
-        self.root.protocol("WM_DELETE_WINDOW", self.detener)
+        self.root.protocol("WM_DELETE_WINDOW", self._al_cerrar_ventana)
 
         # Arrancar el hilo MQTT una vez que la UI y la cola están listas
         self.start()
@@ -473,6 +571,17 @@ class AppPublico(MQTTPub):
             self.root.mainloop()
         except KeyboardInterrupt:
             self.detener()
+
+    def _al_cerrar_ventana(self):
+        """Los pedidos sin PUBACK solo están en memoria: cerrar los pierde, así que se avisa antes."""
+        if self._pendientes and not messagebox.askyesno(
+            "Pedido sin enviar",
+            "Tenés un pedido que todavía no llegó al sistema y se pierde si cerrás.\n"
+            f"Si es urgente llamá:\n{TELEFONOS}\n\n¿Cerrar igual?",
+            icon="warning",
+        ):
+            return
+        self.detener()
 
     def detener(self):
         """Cierre limpio: cancela el polling, desconecta MQTT y destruye la ventana."""
@@ -487,6 +596,12 @@ class AppPublico(MQTTPub):
             except Exception:
                 pass
             self._after_id = None
+        if self._after_estado and self.root:
+            try:
+                self.root.after_cancel(self._after_estado)
+            except Exception:
+                pass
+            self._after_estado = None
 
         # 2. Frenar el hilo MQTT (como _cerrando=True, los callbacks no tocarán nada)
         try:
@@ -527,6 +642,10 @@ def main():
         "--prueba", action="store_true",
         help="Modo demo: habilita un selector con 10 ubicaciones de prueba",
     )
+    parser.add_argument(
+        "--perfil", type=int, default=None,
+        help="Número de celular simulado: cada instancia abierta a la vez necesita uno distinto",
+    )
     parser.add_argument("--broker", type=str, default=entorno["ip_broker"], help="IP del broker MQTT")
     parser.add_argument("--puerto", type=int, default=None, help="Puerto del broker MQTT")
     parser.add_argument("--ca-certs", type=str, default=entorno["ca_certs"] or CA_CERTS_DEFAULT, help="Ruta al certificado CA")
@@ -544,7 +663,7 @@ def main():
             print(f"[publico] No existe el certificado CA: {ca} (para probar sin TLS: --no-tls)")
             sys.exit(1)
 
-    client_id = obtener_client_id()
+    client_id = obtener_client_id(args.perfil)
 
     app = AppPublico(
         client_id=client_id,
