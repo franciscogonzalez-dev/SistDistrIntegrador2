@@ -159,14 +159,16 @@ QoS 1 puede entregar un mensaje mas de una vez, entonces el servicio tiene que p
 
 | Mensaje | Como se reconoce un duplicado | Que hace el servicio |
 |---------|-------------------------------|----------------------|
-| `comandos` | mismo `id` de comando ya procesado | No lo vuelve a aplicar. Reenvia la misma respuesta a `respuestas/{despachador}`, por si la primera se perdio. |
-| `pedidos` | mismo `clientid` (del topico) + mismo `id` (del payload) | No crea otra emergencia. Guarda a que `eid` corresponde cada pedido y, si llega repetido, lo ignora. |
+| `comandos` | mismo `id` de comando ya procesado | No lo vuelve a aplicar. Republica desde la BD el estado que dejo en `flota/` y `emergencias/` y reenvia la misma respuesta a `respuestas/{despachador}`, por si el servicio se cayo antes de publicarlos o la respuesta se perdio. |
+| `pedidos` | mismo `clientid` (del topico) + mismo `id` (del payload) | No crea otra emergencia. Guarda a que `eid` corresponde cada pedido y, si llega repetido, republica esa emergencia, por si el servicio se cayo antes de publicarla. Si ya esta cerrada no publica nada. |
 | `posicion` | `ts` menor o igual al ultimo aceptado de esa unidad | La descarta. Cubre duplicados y posiciones que llegan desordenadas. Ademas el `ts` tiene que estar cerca del reloj del servicio (ver abajo). |
 | Mensajes de estado (`presencia`, `flota`, `emergencias`, `servicio/estado`) | — | No hace falta nada: traen el estado completo, recibirlos dos veces deja el mismo resultado. |
 
 * El `id` de comandos y pedidos lo genera el cliente (uuid4), uno por accion. Si el cliente reintenta la misma accion, manda el mismo `id`; si es una accion nueva, uno nuevo.
 * El pedido se identifica por `clientid` + `id` y no solo por `id`, asi un civil no puede pisar el pedido de otro mandando el mismo `id`.
 * Los ids ya procesados y el ultimo `ts` de cada unidad se guardan en SQLite (#11), no solo en memoria: si el servicio se reinicia y el broker le reentrega mensajes de la sesion persistente, los sigue reconociendo como duplicados.
+
+**Limite de pedidos:** el servicio acepta hasta 5 pedidos por `clientid` y 50 en total por minuto, y descarta el resto (solo queda en el log). El limite cuenta por hora de procesamiento, asi que tambien alcanza a los pedidos acumulados durante una caida. Limitacion conocida: los `clientid` del usuario `publico` son libres, asi que un script que los rote puede agotar el limite global y bloquear pedidos reales.
 
 #### El `ts` de la posicion no se toma a ciegas
 El salto imposible se calcula como velocidad: distancia / (`ts` actual - `ts` anterior), maximo 75 m/s. Pero el `ts` lo escribe la unidad, y una unidad tramposa podria saltar 10 km y poner un `ts` 200 s mas adelante: la velocidad da 50 m/s y pasaria. Por eso el servicio (#9):
