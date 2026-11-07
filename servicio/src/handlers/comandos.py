@@ -3,16 +3,16 @@
 Implementación de Issue #12:
 1. Extrae identidad y contexto exclusivamente de los tópicos (despachador, tipo, unidad).
 2. Valida estructura con comun.payloads.COMANDO.
-3. Si incluye token JWT, valida firma y claims con comun.jwt_auth.
-4. Idempotencia: deduplica por despachador + id de comando. Si ya se procesó,
-   no re-ejecuta la acción y reenvía la respuesta previa a respuestas/{despachador}.
-5. Acción 'asignar':
+3. Idempotencia: deduplica por despachador + id de comando. Si ya se procesó, no re-ejecuta
+   la acción: republica el estado oficial desde la BD y reenvía la respuesta guardada.
+4. Acción 'asignar':
    - Solo permite asignar unidades libres y online.
    - Si no cumple o la emergencia no existe/ya está asignada, rechaza la orden y avisa
      al despachador en respuestas/{despachador} (payloads.respuesta con ok=False y motivo).
    - Si es válido, pasa la unidad a ocupada, la emergencia a asignada, y notifica por
      flota/, emergencias/ y respuestas/{despachador}.
-6. Acción 'liberar':
+5. Acción 'liberar':
+   - Rechaza la orden si el tipo del tópico no es el tipo de la unidad.
    - Marca la unidad libre en flota/ y cierra la emergencia (retained vacío en emergencias/{tipo}/{eid}).
    - Notifica confirmación en respuestas/{despachador}.
 """
@@ -22,22 +22,44 @@ import logging
 import sqlite3
 import time
 
-from comun import payloads, topics
+from comun import payloads
 from . import pub_salidas
 
 logger = logging.getLogger("servicio.comandos")
 
 
 def _rechazar(cliente, bd, despachador, cmd_id, motivo):
-    """Emite una respuesta de rechazo oficial al despachador y la registra para idempotencia."""
-    resp = pub_salidas.publicar_respuesta(cliente, despachador, cmd_id, ok=False, motivo=motivo)
-    try:
-        with bd.transaccion():
-            bd.guardar_procesado("comando", despachador, cmd_id, json.dumps(resp), time.time())
-    except sqlite3.Error:
-        logger.exception("Error al registrar rechazo de comando %s en la base de datos", cmd_id)
+    """Registra el rechazo para idempotencia y recién después avisa al despachador."""
+    resp = payloads.respuesta(id=cmd_id, ok=False, motivo=motivo)
+    # Si falla salta al except de sqlite3 de procesar: un comando informado como rechazado
+    # no se puede aplicar después con el mismo id (docs/topics.md, Idempotencia)
+    with bd.transaccion():
+        bd.guardar_procesado("comando", despachador, cmd_id, json.dumps({"respuesta": resp}), time.time())
+    pub_salidas.publicar_respuesta(cliente, despachador, resp)
     logger.warning("Comando %s de %s RECHAZADO: %s", cmd_id, despachador, motivo)
     return resp
+
+
+def _guardar_aplicado(bd, despachador, cmd_id, resp, tipo, unidad, eid):
+    """Guarda lo necesario para republicar el estado si el comando llega duplicado.
+
+    El eid se guarda porque, después de liberar, la unidad ya no lo tiene y el comando puede no traerlo.
+    """
+    resultado = {"respuesta": resp, "tipo": tipo, "unidad": unidad, "eid": eid}
+    bd.guardar_procesado("comando", despachador, cmd_id, json.dumps(resultado), time.time())
+
+
+def _republicar_estado(cliente, bd, tipo, unidad, eid):
+    """Republica desde la BD lo que un comando ya aplicado dejó en flota/ y emergencias/.
+
+    Un duplicado puede ser el reenvío de QoS 1 tras una caída entre el commit y las publicaciones.
+    Sale del estado actual de la BD, así un asignar repetido no revive una emergencia ya cerrada.
+    """
+    pub_salidas.publicar_flota(cliente, bd, tipo, unidad)
+    if bd.leer_emergencia(eid) is not None:
+        pub_salidas.publicar_emergencia(cliente, bd, tipo, eid)
+    else:
+        pub_salidas.cerrar_emergencia(cliente, tipo, eid)
 
 
 def procesar(cliente, bd, despachador, tipo, unidad, raw_payload):
@@ -48,21 +70,6 @@ def procesar(cliente, bd, despachador, tipo, unidad, raw_payload):
     except payloads.PayloadInvalido as e:
         logger.warning("Comando inválido de %s para %s: %s", despachador, unidad, e)
         return None
-
-    # 2. Verificación opcional de token JWT de autorización
-    token_jwt = datos.get("jwt")
-    if token_jwt:
-        try:
-            from comun import jwt_auth
-            claims = jwt_auth.verificar_token(token_jwt)
-            logger.info(
-                "JWT verificado para operador '%s' (rol: %s, jti: %s)",
-                claims.get("sub"),
-                claims.get("rol"),
-                claims.get("jti"),
-            )
-        except Exception as e:
-            logger.warning("Fallo de verificación JWT en comando de %s: %s", despachador, e)
 
     cmd_id = datos["id"]
     accion = datos["accion"]
@@ -77,20 +84,22 @@ def procesar(cliente, bd, despachador, tipo, unidad, raw_payload):
         cmd_id,
     )
 
-    # 3. Idempotencia: un comando con id ya procesado no se aplica dos veces
+    # 2. Idempotencia: un comando con id ya procesado no se aplica dos veces
     try:
         procesado = bd.leer_id_procesado("comando", despachador, cmd_id)
         if procesado is not None:
             logger.info("Comando duplicado de %s con id=%s: reenviando respuesta previa", despachador, cmd_id)
-            resp = json.loads(procesado["resultado"])
-            topic_resp = topics.respuestas(despachador)
-            cliente.publish(resp, topic=topic_resp, qos=1, retain=False)
-            return resp
+            resultado = json.loads(procesado["resultado"])
+            # Un rechazo no cambió nada: solo los comandos aplicados guardan eid
+            if "eid" in resultado:
+                _republicar_estado(cliente, bd, resultado["tipo"], resultado["unidad"], resultado["eid"])
+            pub_salidas.publicar_respuesta(cliente, despachador, resultado["respuesta"])
+            return resultado["respuesta"]
     except sqlite3.Error:
         logger.exception("Error al verificar idempotencia del comando %s de %s", cmd_id, despachador)
         return None
 
-    # 4. Procesamiento según acción
+    # 3. Procesamiento según acción
     try:
         fila_unidad = bd.leer_unidad(unidad)
 
@@ -145,12 +154,12 @@ def procesar(cliente, bd, despachador, tipo, unidad, raw_payload):
             resp = payloads.respuesta(id=cmd_id, ok=True)
             with bd.transaccion():
                 bd.asignar_emergencia(eid, unidad)
-                bd.guardar_procesado("comando", despachador, cmd_id, json.dumps(resp), time.time())
+                _guardar_aplicado(bd, despachador, cmd_id, resp, tipo, unidad, eid)
 
             # Publicaciones de estado oficial
             pub_salidas.publicar_flota(cliente, bd, tipo, unidad)
             pub_salidas.publicar_emergencia(cliente, bd, tipo, eid)
-            pub_salidas.publicar_respuesta(cliente, despachador, cmd_id, ok=True)
+            pub_salidas.publicar_respuesta(cliente, despachador, resp)
 
             logger.info("Móvil %s asignado con éxito a emergencia %s por %s", unidad, eid, despachador)
             return resp
@@ -158,6 +167,16 @@ def procesar(cliente, bd, despachador, tipo, unidad, raw_payload):
         elif accion == "liberar":
             if fila_unidad is None:
                 return _rechazar(cliente, bd, despachador, cmd_id, f"Unidad {unidad} no registrada")
+
+            # El tipo del tópico arma los tópicos de salida: con otro tipo quedarían vivos los retained reales
+            if fila_unidad["tipo"] != tipo:
+                return _rechazar(
+                    cliente,
+                    bd,
+                    despachador,
+                    cmd_id,
+                    f"Tipo de unidad incompatible: {unidad} es {fila_unidad['tipo']}, no {tipo}",
+                )
 
             eid_asignado = fila_unidad["eid"]
             if eid_asignado is None:
@@ -177,12 +196,12 @@ def procesar(cliente, bd, despachador, tipo, unidad, raw_payload):
             resp = payloads.respuesta(id=cmd_id, ok=True)
             with bd.transaccion():
                 bd.cerrar_emergencia(eid_asignado)
-                bd.guardar_procesado("comando", despachador, cmd_id, json.dumps(resp), time.time())
+                _guardar_aplicado(bd, despachador, cmd_id, resp, tipo, unidad, eid_asignado)
 
             # Publicaciones de estado oficial
             pub_salidas.publicar_flota(cliente, bd, tipo, unidad)
             pub_salidas.cerrar_emergencia(cliente, tipo, eid_asignado)
-            pub_salidas.publicar_respuesta(cliente, despachador, cmd_id, ok=True)
+            pub_salidas.publicar_respuesta(cliente, despachador, resp)
 
             logger.info(
                 "Móvil %s liberado con éxito por %s; emergencia %s cerrada",

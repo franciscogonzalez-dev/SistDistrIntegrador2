@@ -4,7 +4,7 @@ Implementación de Issue #12:
 1. Valida el payload estructural con comun.payloads.PEDIDO.
 2. Valida que la coordenada GPS se encuentre dentro de la zona operativa (validador.en_zona).
 3. Idempotencia: deduplica por clientid + id consultando pedidos_comandos_procesados.
-   Si ya fue procesado, no crea otra emergencia y no vuelve a publicar.
+   Si ya fue procesado, no crea otra emergencia y republica la que ya existe.
 4. Aplica rate limit por clientid y global para evitar spam o ataques DoS sobre el usuario compartido.
 5. Genera un identificador único propio del servicio (eid, ej. E1, E2...).
 6. Guarda la emergencia en la BD y publica en emergencias/{tipo}/{eid} (QoS 1, retain=True).
@@ -27,28 +27,26 @@ MAX_PEDIDOS_CLIENTE = 5       # Máximo de pedidos por clientid en la ventana
 MAX_PEDIDOS_GLOBAL = 50       # Máximo de pedidos totales en la ventana
 VENTANA_TIEMPO_SEG = 60.0     # Ventana de tiempo en segundos
 
-_historial_por_cliente = collections.defaultdict(list)
-_historial_global = []
+_historial_global = collections.deque()         # (ts, clientid) de los pedidos aceptados en la ventana
+_pedidos_por_cliente = collections.Counter()    # Solo clientids con pedidos en la ventana
 
 
 def reset_limites():
     """Limpia las marcas de tiempo de control de tasa (útil en pruebas)."""
-    _historial_por_cliente.clear()
     _historial_global.clear()
+    _pedidos_por_cliente.clear()
 
 
 def _verificar_limites(clientid: str, ahora: float) -> bool:
     """Verifica si el pedido cumple con los límites de tasa por cliente y global."""
     limite_tiempo = ahora - VENTANA_TIEMPO_SEG
 
-    # Filtrar timestamps viejos en el contador global
-    while _historial_global and _historial_global[0] < limite_tiempo:
-        _historial_global.pop(0)
-
-    # Filtrar timestamps viejos para el clientid
-    hist_cliente = _historial_por_cliente[clientid]
-    while hist_cliente and hist_cliente[0] < limite_tiempo:
-        hist_cliente.pop(0)
+    # Filtrar pedidos viejos: el clientid que no vuelve a pedir no queda en memoria
+    while _historial_global and _historial_global[0][0] < limite_tiempo:
+        _, cliente_viejo = _historial_global.popleft()
+        _pedidos_por_cliente[cliente_viejo] -= 1
+        if not _pedidos_por_cliente[cliente_viejo]:
+            del _pedidos_por_cliente[cliente_viejo]
 
     if len(_historial_global) >= MAX_PEDIDOS_GLOBAL:
         logger.warning(
@@ -59,17 +57,17 @@ def _verificar_limites(clientid: str, ahora: float) -> bool:
         )
         return False
 
-    if len(hist_cliente) >= MAX_PEDIDOS_CLIENTE:
+    if _pedidos_por_cliente[clientid] >= MAX_PEDIDOS_CLIENTE:
         logger.warning(
             "Pedido de %s descartado: límite de pedidos por cliente alcanzado (%d en %.0fs)",
             clientid,
-            len(hist_cliente),
+            _pedidos_por_cliente[clientid],
             VENTANA_TIEMPO_SEG,
         )
         return False
 
-    _historial_global.append(ahora)
-    hist_cliente.append(ahora)
+    _historial_global.append((ahora, clientid))
+    _pedidos_por_cliente[clientid] += 1
     return True
 
 
@@ -106,6 +104,11 @@ def procesar(cliente, bd, clientid, tipo, raw_payload, hora_servicio=None):
                 datos["id"],
                 procesado["resultado"],
             )
+            # Puede ser el reenvío de QoS 1 tras una caída entre el commit y el publish.
+            # Se usa el tipo de la BD, no el del tópico, y una emergencia ya cerrada no se revive.
+            fila = bd.leer_emergencia(procesado["resultado"])
+            if fila is not None:
+                pub_salidas.publicar_emergencia(cliente, bd, fila["tipo"], fila["eid"])
             return procesado["resultado"]
     except sqlite3.Error:
         logger.exception("Error al verificar idempotencia del pedido de %s (id=%s)", clientid, datos["id"])
