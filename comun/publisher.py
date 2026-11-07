@@ -102,10 +102,20 @@ class MQTTPub():
         if self._client.is_connected():
             self.publish(dato, topic, qos=qos, retain=retain)
 
+    def _callback_protegido(self, callback):
+        #una excepcion en un callback mata el hilo de red de paho y el proceso sigue vivo sin atender mensajes,
+        #asi que Docker no lo reinicia. Se descarta el mensaje: paho lo confirma igual y el broker no lo reentrega
+        def protegido(client, userdata, msg):
+            try:
+                callback(client, userdata, msg)
+            except Exception:
+                logger.exception("Error procesando un mensaje de '%s', se descarta", msg.topic)
+        return protegido
+
     def subscribe(self, topic, callback=None, qos=1):
         self._suscripciones[topic] = (qos, callback)
         if callback:
-            self._client.message_callback_add(topic, callback)
+            self._client.message_callback_add(topic, self._callback_protegido(callback))
         if self._client.is_connected():
             self._client.subscribe(topic, qos=qos)
 
