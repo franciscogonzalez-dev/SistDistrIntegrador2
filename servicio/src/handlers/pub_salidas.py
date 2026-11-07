@@ -51,13 +51,12 @@ def cerrar_emergencia(cliente, tipo, eid):
     logger.info("Emergencia cerrada (retained vacío) en %s", topic_emerg)
 
 
-def publicar_respuesta(cliente, despachador, id_comando, ok, motivo=None):
+def publicar_respuesta(cliente, despachador, resp):
     # Respuestas a comandos del despachador en respuestas/{despachador} (QoS 1, sin retain)
-    resp = payloads.respuesta(id=id_comando, ok=ok, motivo=motivo)
+    # Recibe la respuesta ya armada: la que se guarda y la que se reenvia tienen que ser la misma
     topic_resp = topics.respuestas(despachador)
     cliente.publish(resp, topic=topic_resp, qos=1, retain=False)
-    logger.info("Respuesta publicada en %s (ok=%s, motivo=%s)", topic_resp, ok, motivo)
-    return resp
+    logger.info("Respuesta publicada en %s (ok=%s, motivo=%s)", topic_resp, resp["ok"], resp.get("motivo"))
     
     
 def publicar_alerta(cliente, tipo, motivo, mensaje, unidad, eid):

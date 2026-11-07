@@ -9,8 +9,9 @@ Valida:
 """
 
 import json
+import sqlite3
 import unittest
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 from comun import payloads
 from servicio.src.bd import BD
@@ -80,8 +81,49 @@ class TestPedidosYComandos(unittest.TestCase):
         # Segundo envío con el mismo clientid + id
         eid2 = pedidos.procesar(self.cliente, self.bd, "publico-123", "ambulancia", payload_bytes)
         self.assertEqual(eid2, "E1")
-        # No debe haber publicado otra emergencia
-        self.assertEqual(self.cliente.publish.call_count, 1)
+        # Republica la misma emergencia, no crea otra
+        self.assertEqual(self.bd.generar_siguiente_eid(), "E2")
+        self.assertEqual(
+            [t for t, _, _, _ in self._publicaciones()],
+            ["emergencias/ambulancia/E1", "emergencias/ambulancia/E1"],
+        )
+
+    def test_pedido_reenviado_tras_caida_publica_la_emergencia(self):
+        payload_bytes = payloads.pedido(lat=-45.864, lon=-67.485, id="ped-caida")
+
+        # El servicio se cae después del commit y antes de publicar: el broker reenvía el pedido
+        self.cliente.publish.side_effect = ConnectionError("caida simulada")
+        with self.assertRaises(ConnectionError):
+            pedidos.procesar(self.cliente, self.bd, "publico-123", "ambulancia", payload_bytes)
+        self.cliente.reset_mock(side_effect=True)
+
+        eid = pedidos.procesar(self.cliente, self.bd, "publico-123", "ambulancia", payload_bytes)
+
+        self.assertEqual(eid, "E1")
+        emerg, retain, _ = self._publicacion_en("emergencias/ambulancia/E1")
+        self.assertEqual(emerg["estado"], "sin_asignar")
+        self.assertTrue(retain)
+
+    def test_pedido_duplicado_con_otro_tipo_republica_en_el_tipo_original(self):
+        payload_bytes = payloads.pedido(lat=-45.864, lon=-67.485, id="ped-tipo")
+        pedidos.procesar(self.cliente, self.bd, "publico-123", "ambulancia", payload_bytes)
+        self.cliente.reset_mock()
+
+        pedidos.procesar(self.cliente, self.bd, "publico-123", "policia", payload_bytes)
+
+        self.assertEqual([t for t, _, _, _ in self._publicaciones()], ["emergencias/ambulancia/E1"])
+
+    def test_pedido_duplicado_no_revive_emergencia_cerrada(self):
+        payload_bytes = payloads.pedido(lat=-45.864, lon=-67.485, id="ped-cerrado")
+        pedidos.procesar(self.cliente, self.bd, "publico-123", "ambulancia", payload_bytes)
+        with self.bd.transaccion():
+            self.bd.cerrar_emergencia("E1")
+        self.cliente.reset_mock()
+
+        eid = pedidos.procesar(self.cliente, self.bd, "publico-123", "ambulancia", payload_bytes)
+
+        self.assertEqual(eid, "E1")
+        self.cliente.publish.assert_not_called()
 
     def test_pedido_mismo_id_distinto_clientid_crea_dos_emergencias(self):
         # Mismo id generado por dos teléfonos diferentes
@@ -119,6 +161,27 @@ class TestPedidosYComandos(unittest.TestCase):
         payload_bytes_extra = payloads.pedido(lat=-45.864, lon=-67.485, id="ped-lim-extra")
         eid_extra = pedidos.procesar(self.cliente, self.bd, "publico-spam", "ambulancia", payload_bytes_extra)
         self.assertIsNone(eid_extra)
+
+    def test_rate_limit_global(self):
+        for i in range(pedidos.MAX_PEDIDOS_GLOBAL):
+            self.assertTrue(pedidos._verificar_limites(f"publico-{i}", 1000.0))
+
+        self.assertFalse(pedidos._verificar_limites("publico-extra", 1000.0))
+        # Pasada la ventana vuelve a aceptar
+        self.assertTrue(pedidos._verificar_limites("publico-extra", 1000.0 + pedidos.VENTANA_TIEMPO_SEG + 1))
+
+    def test_rate_limit_no_acumula_clientids_en_memoria(self):
+        # Clientids que piden una vez y no vuelven, repartidos para no tocar el límite global
+        for i in range(1000):
+            pedidos._verificar_limites(f"publico-{i}", 1000.0 + i * (pedidos.VENTANA_TIEMPO_SEG + 1))
+        self.assertEqual(len(pedidos._pedidos_por_cliente), 1)
+
+        # Rechazado por el límite global: tampoco deja una entrada
+        pedidos.reset_limites()
+        for i in range(pedidos.MAX_PEDIDOS_GLOBAL):
+            pedidos._verificar_limites(f"publico-{i}", 1000.0)
+        pedidos._verificar_limites("publico-extra", 1000.0)
+        self.assertNotIn("publico-extra", pedidos._pedidos_por_cliente)
 
     def test_eid_secuencial_no_reutiliza_cerradas(self):
         # 1. Crear E1
@@ -267,6 +330,19 @@ class TestPedidosYComandos(unittest.TestCase):
         self.assertFalse(resp["ok"])
         self.assertIn("ya está libre", resp["motivo"].lower())
 
+    def test_liberar_con_tipo_cruzado_rechazado_sin_tocar_nada(self):
+        self._preparar_unidad("amb-01", "ambulancia", "online")
+        self._preparar_emergencia("E1", "ambulancia", unidad="amb-01")
+
+        payload_bytes = payloads.comando(accion="liberar", id="cmd-cruzado")
+        resp = comandos.procesar(self.cliente, self.bd, "desp-01", "policia", "amb-01", payload_bytes)
+
+        self.assertFalse(resp["ok"])
+        self.assertIn("incompatible", resp["motivo"].lower())
+        self.assertEqual(self.bd.leer_unidad("amb-01")["eid"], "E1")
+        self.assertIsNotNone(self.bd.leer_emergencia("E1"))
+        self.assertEqual([t for t, _, _, _ in self._publicaciones()], ["respuestas/desp-01"])
+
     def test_comando_idempotente_reenvia_misma_respuesta(self):
         self._preparar_unidad("amb-01", "ambulancia", "online")
         self._preparar_emergencia("E1", "ambulancia")
@@ -288,6 +364,106 @@ class TestPedidosYComandos(unittest.TestCase):
         # Se reenvió la respuesta por respuestas/desp-01
         cant_resp_2 = len([t for t, _, _, _ in self._publicaciones() if t == "respuestas/desp-01"])
         self.assertEqual(cant_resp_2, 2)
+
+    def _simular_caida_tras_commit(self, tipo, unidad, payload_bytes):
+        """Corre el comando cayéndose en la primera publicación y deja el cliente limpio para el reenvío."""
+        self.cliente.publish.side_effect = ConnectionError("caida simulada")
+        with self.assertRaises(ConnectionError):
+            comandos.procesar(self.cliente, self.bd, "desp-01", tipo, unidad, payload_bytes)
+        self.cliente.reset_mock(side_effect=True)
+
+    def test_asignar_reenviado_tras_caida_republica_estado(self):
+        self._preparar_unidad("amb-01", "ambulancia", "online")
+        self._preparar_emergencia("E1", "ambulancia")
+        payload_bytes = payloads.comando(accion="asignar", eid="E1", id="cmd-caida")
+
+        self._simular_caida_tras_commit("ambulancia", "amb-01", payload_bytes)
+        resp = comandos.procesar(self.cliente, self.bd, "desp-01", "ambulancia", "amb-01", payload_bytes)
+
+        self.assertTrue(resp["ok"])
+        flota, retain_f, _ = self._publicacion_en("flota/ambulancia/amb-01/estado")
+        self.assertEqual(flota["disponibilidad"], "ocupada")
+        self.assertTrue(retain_f)
+        emerg, retain_e, _ = self._publicacion_en("emergencias/ambulancia/E1")
+        self.assertEqual(emerg["estado"], "asignada")
+        self.assertTrue(retain_e)
+        self.assertTrue(self._publicacion_en("respuestas/desp-01")[0]["ok"])
+
+    def test_liberar_reenviado_tras_caida_cierra_emergencia_sin_eid_en_el_comando(self):
+        self._preparar_unidad("amb-01", "ambulancia", "online")
+        self._preparar_emergencia("E1", "ambulancia", unidad="amb-01")
+        payload_bytes = payloads.comando(accion="liberar", id="cmd-lib-caida")
+
+        self._simular_caida_tras_commit("ambulancia", "amb-01", payload_bytes)
+        resp = comandos.procesar(self.cliente, self.bd, "desp-01", "ambulancia", "amb-01", payload_bytes)
+
+        self.assertTrue(resp["ok"])
+        flota, _, _ = self._publicacion_en("flota/ambulancia/amb-01/estado")
+        self.assertEqual(flota["disponibilidad"], "libre")
+        emerg, retain_e, _ = self._publicacion_en("emergencias/ambulancia/E1")
+        self.assertEqual(emerg, b"")
+        self.assertTrue(retain_e)
+
+    def test_asignar_duplicado_tardio_no_revive_emergencia_cerrada(self):
+        self._preparar_unidad("amb-01", "ambulancia", "online")
+        self._preparar_emergencia("E1", "ambulancia")
+        asignar = payloads.comando(accion="asignar", eid="E1", id="cmd-asig-tarde")
+        comandos.procesar(self.cliente, self.bd, "desp-01", "ambulancia", "amb-01", asignar)
+        liberar = payloads.comando(accion="liberar", id="cmd-lib-tarde")
+        comandos.procesar(self.cliente, self.bd, "desp-01", "ambulancia", "amb-01", liberar)
+        self.cliente.reset_mock()
+
+        comandos.procesar(self.cliente, self.bd, "desp-01", "ambulancia", "amb-01", asignar)
+
+        self.assertEqual(self._publicacion_en("emergencias/ambulancia/E1")[0], b"")
+        flota, _, _ = self._publicacion_en("flota/ambulancia/amb-01/estado")
+        self.assertEqual(flota["disponibilidad"], "libre")
+        self.assertIsNone(self.bd.leer_emergencia("E1"))
+
+    def test_rechazo_duplicado_solo_reenvia_la_respuesta(self):
+        self._preparar_unidad("amb-01", "ambulancia", "online")
+        payload_bytes = payloads.comando(accion="liberar", id="cmd-rechazo")
+        primera = comandos.procesar(self.cliente, self.bd, "desp-01", "ambulancia", "amb-01", payload_bytes)
+        self.cliente.reset_mock()
+
+        segunda = comandos.procesar(self.cliente, self.bd, "desp-01", "ambulancia", "amb-01", payload_bytes)
+
+        self.assertEqual(segunda, primera)
+        self.assertEqual([t for t, _, _, _ in self._publicaciones()], ["respuestas/desp-01"])
+
+    def test_rechazo_sin_poder_guardar_no_avisa_y_se_puede_reevaluar(self):
+        self._preparar_unidad("amb-01", "ambulancia", "online")
+        self._preparar_emergencia("E1", "ambulancia")
+        with self.bd.transaccion():
+            self.bd.actualizar_presencia("amb-01", "ambulancia", "offline")
+        payload_bytes = payloads.comando(accion="asignar", eid="E1", id="cmd-sin-guardar")
+
+        with patch.object(self.bd, "guardar_procesado", side_effect=sqlite3.OperationalError("disco lleno")):
+            resp = comandos.procesar(self.cliente, self.bd, "desp-01", "ambulancia", "amb-01", payload_bytes)
+        self.assertIsNone(resp)
+        self.cliente.publish.assert_not_called()
+
+        # Sin rechazo informado, el mismo id se puede aplicar cuando la unidad vuelve
+        with self.bd.transaccion():
+            self.bd.actualizar_presencia("amb-01", "ambulancia", "online")
+        resp = comandos.procesar(self.cliente, self.bd, "desp-01", "ambulancia", "amb-01", payload_bytes)
+        self.assertTrue(resp["ok"])
+
+    def test_respuesta_enviada_guardada_y_reenviada_es_la_misma(self):
+        self._preparar_unidad("amb-01", "ambulancia", "online")
+        self._preparar_emergencia("E1", "ambulancia")
+        payload_bytes = payloads.comando(accion="asignar", eid="E1", id="cmd-misma")
+
+        resp = comandos.procesar(self.cliente, self.bd, "desp-01", "ambulancia", "amb-01", payload_bytes)
+        enviada = self._publicacion_en("respuestas/desp-01")[0]
+        guardada = json.loads(self.bd.leer_id_procesado("comando", "desp-01", "cmd-misma")["resultado"])["respuesta"]
+        self.cliente.reset_mock()
+        comandos.procesar(self.cliente, self.bd, "desp-01", "ambulancia", "amb-01", payload_bytes)
+        reenviada = self._publicacion_en("respuestas/desp-01")[0]
+
+        self.assertEqual(enviada, resp)
+        self.assertEqual(guardada, enviada)
+        self.assertEqual(reenviada, enviada)
 
     # =========================================================================
     # TESTS DE ENRUTAMIENTO INTEGRADO (SERVICIO CENTRAL)
