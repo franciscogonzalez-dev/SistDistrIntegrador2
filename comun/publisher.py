@@ -57,6 +57,7 @@ class MQTTPub():
         self._expiracion_sesion = expiracion_sesion #segundos, solo si la sesion es persistente (docs/topics.md: servicio 24 h, despachador 1 h)
         self._suscripciones = {}
         self._al_conectar = [] #mensajes que se publican en cada conexion, ej "online"
+        self.ultimo_mid = None #mid del ultimo publish aceptado, para seguir su PUBACK en _on_publish
 
         #config cliente
         self._client = mqtt.Client(
@@ -159,6 +160,7 @@ class MQTTPub():
             logger.error("publish fallo, rc: %s", info_msg.rc)
             return False
 
+        self.ultimo_mid = info_msg.mid
         return True
 
     def _on_connect(self, client, userdata, connect_flags, reason_code, properties):
