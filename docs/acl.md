@@ -103,28 +103,36 @@ El broker evalúa las reglas **de arriba hacia abajo** y aplica la primera que c
 
 %% 2. unidades móviles: el prefijo del usuario fija la fuerza permitida
 %% solo sus dos topicos (posicion y presencia, que incluye el Last Will), no reportes/.../#
+%% retain solo en presencia: en los demas topicos de entrada un mensaje retenido
+%% se le volveria a entregar al servicio en cada reconexion
 
 %% ambulancias
+{allow, {username, {re, "^amb-"}}, {publish, [{retain, false}]}, [
+    "reportes/ambulancia/${username}/posicion"
+]}.
 {allow, {username, {re, "^amb-"}}, publish, [
-    "reportes/ambulancia/${username}/posicion",
     "reportes/ambulancia/${username}/presencia"
 ]}.
 
 %% policías
+{allow, {username, {re, "^pol-"}}, {publish, [{retain, false}]}, [
+    "reportes/policia/${username}/posicion"
+]}.
 {allow, {username, {re, "^pol-"}}, publish, [
-    "reportes/policia/${username}/posicion",
     "reportes/policia/${username}/presencia"
 ]}.
 
 %% bomberos
+{allow, {username, {re, "^bom-"}}, {publish, [{retain, false}]}, [
+    "reportes/bomberos/${username}/posicion"
+]}.
 {allow, {username, {re, "^bom-"}}, publish, [
-    "reportes/bomberos/${username}/posicion",
     "reportes/bomberos/${username}/presencia"
 ]}.
 
 %% 3. despachador: emite comandos propios y monitorea la flota y emergencias
 
-{allow, {username, {re, "^desp-"}}, publish, [
+{allow, {username, {re, "^desp-"}}, {publish, [{retain, false}]}, [
     "comandos/${username}/+/+"
 ]}.
 
@@ -138,7 +146,7 @@ El broker evalúa las reglas **de arriba hacia abajo** y aplica la primera que c
 
 %% 4. público (civiles): pide emergencias con su ${clientid}, un nivel por servicio
 %% no tiene topico de salida propio: no ve la flota ni las emergencias, solo si el sistema esta caido
-{allow, {username, "publico"}, publish, [
+{allow, {username, "publico"}, {publish, [{retain, false}]}, [
     "pedidos/${clientid}/+"
 ]}.
 
@@ -179,3 +187,9 @@ El broker evalúa las reglas **de arriba hacia abajo** y aplica la primera que c
 * **Ataque: Secuestro de Órdenes a Móviles:**
   * *Escenario:* Una unidad o un civil intenta enviar comandos a otra unidad en `comandos/...`.
   * *Mitigación:* Solo los usuarios con regex `^desp-` pueden publicar en `comandos/${username}/+/+`. Ni las unidades ni el público tienen regla de publicación sobre ese árbol, cayendo en el `deny` final.
+* **Ataque: Mensaje hecho para romper al servicio:**
+  * *Escenario:* Un cliente autenticado publica en su propio topic, que la ACL permite, un payload armado para que el servicio falle (un entero de cientos de dígitos, un JSON muy anidado), incluso con retained para que se repita en cada reconexión.
+  * *Mitigación:* `payloads.validar` lo descarta como cualquier payload inválido, y `MQTTPub` no deja que una excepción de un callback mate el hilo de red (issue #45). La ACL prohíbe `retain` en los topics de entrada, salvo en `presencia`, que lo necesita. Se demuestra con `pruebas/tramposo_mensaje_hostil.py`.
+* **Ataque: Inundar al despachador de alertas:**
+  * *Escenario:* Una unidad manda posiciones inválidas a toda velocidad; cada alerta es QoS 1 y se encola en la sesión del despachador, hasta desplazar a las alertas reales.
+  * *Mitigación:* El servicio descarta todas, pero publica como mucho una alerta cada 5 s por unidad (`ALERTA_CADA_SEG`).

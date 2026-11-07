@@ -42,6 +42,21 @@ def publicar_emergencia(cliente, bd, tipo, eid):
     topic_emerg = topics.emergencia(tipo, eid)
     cliente.publish(estado, topic=topic_emerg, qos=1, retain=True)
     logger.info("Emergencia publicada en %s", topic_emerg)
+
+
+def cerrar_emergencia(cliente, tipo, eid):
+    # En emergencias/{tipo}/{eid}, un payload vacío retained borra el mensaje retained del broker
+    topic_emerg = topics.emergencia(tipo, eid)
+    cliente.publish(b"", topic=topic_emerg, qos=1, retain=True)
+    logger.info("Emergencia cerrada (retained vacío) en %s", topic_emerg)
+
+
+def publicar_respuesta(cliente, despachador, resp):
+    # Respuestas a comandos del despachador en respuestas/{despachador} (QoS 1, sin retain)
+    # Recibe la respuesta ya armada: la que se guarda y la que se reenvia tienen que ser la misma
+    topic_resp = topics.respuestas(despachador)
+    cliente.publish(resp, topic=topic_resp, qos=1, retain=False)
+    logger.info("Respuesta publicada en %s (ok=%s, motivo=%s)", topic_resp, resp["ok"], resp.get("motivo"))
     
     
 def publicar_alerta(cliente, tipo, motivo, mensaje, unidad, eid):

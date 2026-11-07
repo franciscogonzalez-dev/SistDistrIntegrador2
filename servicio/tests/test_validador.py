@@ -351,6 +351,7 @@ class TestHandlerPosicionSimple(unittest.TestCase):
         self.hora = 1730000000.0
         self.lat_centro = -45.8641
         self.lon_centro = -67.4850
+        posicion._ultima_alerta.clear()
 
     def _reportar(self, delta=0.0, lat=None, bd=None):
         """Reporta una posición de pol-01 a self.hora + delta, con el reloj del servicio sincronizado."""
@@ -471,6 +472,23 @@ class TestHandlerPosicionSimple(unittest.TestCase):
         # Debe haber 2 publicaciones en flota (reporte 1 y reporte 3) y 1 alerta (reporte 2)
         self.assertEqual(len(en_flota), 2)
         self.assertEqual(len(en_alertas), 1)
+
+    def test_posiciones_invalidas_seguidas_no_inundan_de_alertas(self):
+        """Cada posición inválida se descarta, pero sale como mucho una alerta cada ALERTA_CADA_SEG."""
+        for delta in range(12):
+            ts = self.hora + delta
+            raw_mar = payloads.posicion(lat=-45.8700, lon=-67.3000, ts=ts)
+            self.assertIsNone(posicion.procesar(self.cliente, self.bd, "policia", "pol-01", raw_mar, hora_servicio=ts))
+
+        en_alertas = [m for m in self.cliente.mensajes if m["topic"] == "alertas/policia"]
+        self.assertEqual(len(en_alertas), 3)  # segundos 0, 5 y 10
+
+    def test_el_limite_de_alertas_es_por_unidad(self):
+        for unidad in ("pol-01", "pol-02"):
+            raw_mar = payloads.posicion(lat=-45.8700, lon=-67.3000, ts=self.hora)
+            posicion.procesar(self.cliente, self.bd, "policia", unidad, raw_mar, hora_servicio=self.hora)
+
+        self.assertEqual(len(self.cliente.mensajes), 2)
 
 
 if __name__ == "__main__":
