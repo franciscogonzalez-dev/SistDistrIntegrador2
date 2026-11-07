@@ -17,10 +17,20 @@ from . import pub_salidas
 
 logger = logging.getLogger("servicio.posicion")
 
+# Como mucho una alerta cada tanto por unidad: las alertas son QoS 1 y se encolan en la sesión del
+# despachador, una unidad mandando basura no tiene que poder llenarle la cola (max_mqueue_len)
+ALERTA_CADA_SEG = 5.0
+_ultima_alerta = {}  # unidad -> hora de la última alerta; las unidades salen de la ACL, no crece sin límite
 
-def _descartar(cliente, tipo, unidad, codigo, detalle):
+
+def _descartar(cliente, tipo, unidad, codigo, detalle, hora_servicio):
     """Registra la posición descartada y avisa al despachador en alertas/{tipo}."""
     logger.warning("Posición descartada de %s (%s) [%s]: %s", unidad, tipo, codigo, detalle)
+
+    ultima = _ultima_alerta.get(unidad)
+    if ultima is not None and hora_servicio - ultima < ALERTA_CADA_SEG:
+        return
+    _ultima_alerta[unidad] = hora_servicio
     pub_salidas.publicar_alerta(cliente, tipo, "posicion_invalida", detalle, unidad, None)
 
 
@@ -33,7 +43,7 @@ def procesar(cliente, bd, tipo, unidad, raw_payload, hora_servicio=None):
     try:
         datos = payloads.validar(payloads.POSICION, raw_payload)
     except payloads.PayloadInvalido as e:
-        _descartar(cliente, tipo, unidad, "payload_invalido", f"Payload con estructura inválida: {e}")
+        _descartar(cliente, tipo, unidad, "payload_invalido", f"Payload con estructura inválida: {e}", hora_servicio)
         return None
 
     try:
@@ -48,7 +58,7 @@ def procesar(cliente, bd, tipo, unidad, raw_payload, hora_servicio=None):
             datos, ultimo_estado=ultimo_estado, hora_servicio=hora_servicio
         )
         if not es_valido:
-            _descartar(cliente, tipo, unidad, codigo_error, detalle)
+            _descartar(cliente, tipo, unidad, codigo_error, detalle, hora_servicio)
             return None
 
         logger.info(
