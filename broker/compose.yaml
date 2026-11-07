@@ -56,6 +56,10 @@ services:
       - EMQX_LISTENERS__SSL__DEFAULT__SSL_OPTIONS__CERTFILE=/opt/emqx/certs/server.crt
       - EMQX_LISTENERS__SSL__DEFAULT__SSL_OPTIONS__KEYFILE=/opt/emqx/certs/server.key
 
+      # Headers de los webhooks: el secreto sale del .env y no queda en emqx.conf
+      - EMQX_CONNECTORS__HTTP__RECEPTOR__HEADERS={"content-type":"application/json","X-Webhook-Secret":"${WEBHOOK_SECRET:?falta WEBHOOK_SECRET en broker/.env (ver .env.example)}"}
+
+
     volumes:
       # [tarea 5 issue 5] Volúmenes con nombre para persistencia de datos y logs:
       # Garantiza que clientes registrados, métricas y estado del broker sobrevivan
