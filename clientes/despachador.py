@@ -49,6 +49,33 @@ from credenciales import clave
 
 CA_CERTS_DEFAULT = str(ROOT_DIR / "broker" / "certs" / "ca.crt")
 USUARIO_DEFAULT = "desp-01"
+ARCHIVO_DESPACHOS = CLIENTES_DIR / "despachos.txt"
+
+def registrar_despacho_archivo(id_unidad, orden):
+    """
+    Actualiza la orden para 'id_unidad' en clientes/despachos.txt:
+    orden: f"{lat} {lon} {eid}" o "volver"
+    """
+    try:
+        lineas = []
+        encontrado = False
+        nueva_linea = f"{id_unidad} {orden}".strip() + "\n"
+        if ARCHIVO_DESPACHOS.exists():
+            with open(ARCHIVO_DESPACHOS, "r", encoding="utf-8") as f:
+                for l in f:
+                    partes = l.strip().split()
+                    if partes and partes[0] == id_unidad:
+                        lineas.append(nueva_linea)
+                        encontrado = True
+                    elif l.strip():
+                        lineas.append(l)
+        if not encontrado:
+            lineas.append(nueva_linea)
+
+        with open(ARCHIVO_DESPACHOS, "w", encoding="utf-8") as f:
+            f.writelines(lineas)
+    except Exception as e:
+        print(f"[Despachador] Error actualizando {ARCHIVO_DESPACHOS.name}: {e}")
 
 # Sesión persistente de 1 h: guarda alertas y respuestas si se cierra la app (docs/topics.md)
 EXPIRACION_SESION_SEG = 3600
@@ -906,6 +933,13 @@ class DespachadorBasico:
 
         ok = self.cliente.publish(payload, topic=topico, qos=1, retain=False)
         if ok:
+            # Notificar en clientes/despachos.txt con las coordenadas de la emergencia
+            info_em = self.emergencias.get(eid, {})
+            lat_em = info_em.get("lat")
+            lon_em = info_em.get("lon")
+            if lat_em is not None and lon_em is not None:
+                registrar_despacho_archivo(id_unidad, f"{lat_em} {lon_em} {eid}")
+
             msg = f"🚀 Comando 'asignar' enviado: {id_unidad} -> {eid} (ID: {cmd_id[:8]}...)"
             print(f"[*] [Comando Asignar] {id_unidad} -> {eid} (ID: {cmd_id[:8]}...) en {topico}")
             self.registrar_evento(msg, tag="info")
@@ -932,6 +966,9 @@ class DespachadorBasico:
 
         ok = self.cliente.publish(payload, topic=topico, qos=1, retain=False)
         if ok:
+            # Notificar en clientes/despachos.txt para retornar a rutina/base
+            registrar_despacho_archivo(id_unidad, "volver")
+
             msg = f"🔓 Comando 'liberar' enviado para {id_unidad} (ID: {cmd_id[:8]}...)"
             print(f"[*] [Comando Liberar] {id_unidad} (ID: {cmd_id[:8]}...) en {topico}")
             self.registrar_evento(msg, tag="info")

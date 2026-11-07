@@ -639,7 +639,7 @@ def main():
         description="App de Emergencias 911 para el ciudadano civil (Comodoro Rivadavia)",
     )
     parser.add_argument(
-        "--prueba", action="store_true",
+        "--prueba", "--pruebas", action="store_true", dest="prueba",
         help="Modo demo: habilita un selector con 10 ubicaciones de prueba",
     )
     parser.add_argument(
@@ -648,6 +648,7 @@ def main():
     )
     parser.add_argument("--broker", type=str, default=entorno["ip_broker"], help="IP del broker MQTT")
     parser.add_argument("--puerto", type=int, default=None, help="Puerto del broker MQTT")
+    parser.add_argument("--password", type=str, default=None, help="Contraseña MQTT del usuario publico")
     parser.add_argument("--ca-certs", type=str, default=entorno["ca_certs"] or CA_CERTS_DEFAULT, help="Ruta al certificado CA")
     parser.add_argument("--no-tls", action="store_true", help="Conectar sin TLS (puerto 1883)")
     args = parser.parse_args()
@@ -664,12 +665,13 @@ def main():
             sys.exit(1)
 
     client_id = obtener_client_id(args.perfil)
+    password_final = args.password if args.password else clave("publico")
 
     app = AppPublico(
         client_id=client_id,
         ip_broker=args.broker,
         puerto=puerto,
-        password=clave("publico"),
+        password=password_final,
         ca_certs=ca,
         modo_prueba=args.prueba,
     )
