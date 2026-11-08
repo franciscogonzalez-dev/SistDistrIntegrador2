@@ -52,6 +52,8 @@ SistDistrIntegrador2/
 │   └── publico.py                # app del publico; falta definir si es otro modo de despachador.py (#16)
 │
 ├── pruebas/                      # scripts de cliente tramposo para la demo (#19)
+│   ├── tramposo.py               # suite interactiva y CLI de pruebas de cliente tramposo (#19)
+│   └── instrucciones.md          # guía de ejecución paso a paso de trampas (#19)
 │
 ├── scripts/
 │   ├── generar_certs.sh          # CA propia y certificado del broker (#4)
