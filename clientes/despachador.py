@@ -26,6 +26,8 @@ La clave se lee de clientes/credenciales.json (ver credenciales.example.json).
 """
 
 import sys
+import time
+import json
 import queue
 import argparse
 from datetime import datetime
@@ -44,10 +46,11 @@ if str(CLIENTES_DIR) not in sys.path:
     sys.path.insert(0, str(CLIENTES_DIR))
 
 from comun.publisher import MQTTPub, config_entorno
-from comun import topics, payloads
-from credenciales import clave
+from comun import topics, payloads, jwt_auth
+from credenciales import clave, autenticar_despachador
 
 CA_CERTS_DEFAULT = str(ROOT_DIR / "broker" / "certs" / "ca.crt")
+SEG_REVISION_JWT = 30  # cada cuanto se revisa si venció el token de la sesión
 USUARIO_DEFAULT = "desp-01"
 ARCHIVO_DESPACHOS = CLIENTES_DIR / "despachos.txt"
 
@@ -112,6 +115,127 @@ def formato_rumbo(rumbo):
     return f"{FLECHAS_RUMBO[idx]} {int(round(rumbo)) % 360}°"
 
 
+class DialogoLogin(tk.Toplevel):
+    """Ventana modal de autenticación para el operador de despacho con emisión de JWT."""
+
+    def __init__(self, parent, usuario_default="desp-01", clave_esperada=None):
+        super().__init__(parent)
+        self.clave_esperada = clave_esperada
+        self.title("🔐 Acceso de Despachador - Autenticación JWT")
+        self.geometry("450x340")
+        self.resizable(False, False)
+        self.configure(bg="#1e272e")
+        self.resultado = None
+
+        self.transient(parent)
+        self.grab_set()
+
+        # Título y encabezado
+        lbl_head = tk.Label(
+            self,
+            text="🚨 Centro de Despacho y Monitoreo",
+            font=("Helvetica", 12, "bold"),
+            bg="#1e272e",
+            fg="#f5f6fa",
+            pady=8,
+        )
+        lbl_head.pack()
+
+        lbl_sub = tk.Label(
+            self,
+            text="Autenticación de Operador con emisión de Token JWT (HS256)",
+            font=("Helvetica", 9),
+            bg="#1e272e",
+            fg="#a4b0be",
+        )
+        lbl_sub.pack(pady=(0, 12))
+
+        frame_form = tk.Frame(self, bg="#2f3640", padx=16, pady=16, relief="ridge", bd=1)
+        frame_form.pack(fill="x", padx=25)
+
+        tk.Label(
+            frame_form,
+            text="Usuario / Operador:",
+            bg="#2f3640",
+            fg="#f5f6fa",
+            font=("Helvetica", 9, "bold"),
+        ).grid(row=0, column=0, sticky="w", pady=6)
+
+        self.ent_usuario = tk.Entry(frame_form, font=("Helvetica", 10), width=22)
+        self.ent_usuario.insert(0, usuario_default)
+        self.ent_usuario.grid(row=0, column=1, pady=6, padx=8)
+
+        tk.Label(
+            frame_form,
+            text="Contraseña:",
+            bg="#2f3640",
+            fg="#f5f6fa",
+            font=("Helvetica", 9, "bold"),
+        ).grid(row=1, column=0, sticky="w", pady=6)
+
+        self.ent_clave = tk.Entry(frame_form, show="•", font=("Helvetica", 10), width=22)
+        self.ent_clave.grid(row=1, column=1, pady=6, padx=8)
+
+        lbl_hint = tk.Label(
+            self,
+            text="💡 Tip: Operador 'desp-01' (clave en clientes/credenciales.json)",
+            font=("Helvetica", 8, "italic"),
+            bg="#1e272e",
+            fg="#7bed9f",
+        )
+        lbl_hint.pack(pady=6)
+
+        frame_botones = tk.Frame(self, bg="#1e272e")
+        frame_botones.pack(pady=10)
+
+        btn_cancelar = tk.Button(
+            frame_botones,
+            text="Cancelar",
+            bg="#57606f",
+            fg="#ffffff",
+            font=("Helvetica", 9),
+            padx=12,
+            pady=4,
+            command=self._cancelar,
+        )
+        btn_cancelar.pack(side="left", padx=8)
+
+        btn_login = tk.Button(
+            frame_botones,
+            text="Iniciar Sesión ➔",
+            bg="#2ed573",
+            fg="#1e272e",
+            font=("Helvetica", 9, "bold"),
+            padx=14,
+            pady=4,
+            cursor="hand2",
+            command=self._ingresar,
+        )
+        btn_login.pack(side="left", padx=8)
+
+        self.bind("<Return>", lambda e: self._ingresar())
+        self.protocol("WM_DELETE_WINDOW", self._cancelar)
+        self.ent_clave.focus_set()
+
+    def _ingresar(self):
+        usuario = self.ent_usuario.get().strip()
+        pwd = self.ent_clave.get()
+        if not usuario or not pwd:
+            messagebox.showwarning("Atención", "Por favor ingrese usuario y contraseña.", parent=self)
+            return
+
+        try:
+            token, claims = autenticar_despachador(usuario, pwd, clave_esperada=self.clave_esperada)
+            self.resultado = (usuario, pwd, token, claims)
+            self.destroy()
+        except ValueError as e:
+            messagebox.showerror("Error de Autenticación", str(e), parent=self)
+
+    def _cancelar(self):
+        self.resultado = None
+        self.destroy()
+
+
 class DespachadorBasico:
     """
     Ventana interactiva de monitoreo y despacho en tiempo real con soporte TLS,
@@ -126,11 +250,16 @@ class DespachadorBasico:
         usuario=USUARIO_DEFAULT,
         password=None,
         ca_certs=CA_CERTS_DEFAULT,
+        token_jwt=None,
+        pedir_login=False,
     ):
         self.ip_broker = ip_broker
         self.puerto = puerto
         self.client_id = client_id
         self.usuario = usuario
+        self.password = password
+        self.token_jwt = token_jwt
+        self.claims_jwt = None
 
         # Marcadores activos en el mapa:
         # Flota: { "amb-01": marker, ... }
@@ -177,6 +306,17 @@ class DespachadorBasico:
         self.root.minsize(1050, 650)
         self.root.configure(bg="#1e272e")
 
+        # Flujo de autenticación con Login interactivo si se solicitó
+        if pedir_login:
+            dialogo = DialogoLogin(self.root, usuario_default=self.usuario, clave_esperada=self.password)
+            self.root.wait_window(dialogo)
+            if not dialogo.resultado:
+                self.root.destroy()
+                sys.exit(0)
+            self.usuario, self.password, self.token_jwt, self.claims_jwt = dialogo.resultado
+            self.client_id = self.usuario
+            self.root.deiconify()
+
         # ----------------------------------------------------------------------
         # 2. Barra superior: Título, resúmenes e indicador del servicio central
         # ----------------------------------------------------------------------
@@ -191,6 +331,21 @@ class DespachadorBasico:
             font=("Helvetica", 12, "bold"),
         )
         self.lbl_titulo.pack(side="left")
+
+        # Botón / Badge de sesión activa con Token JWT
+        self.btn_sesion_jwt = tk.Button(
+            self.barra_superior,
+            text=f"🔑 {self.usuario} (JWT Activo 🟢)",
+            bg="#27ae60",
+            fg="#ffffff",
+            font=("Helvetica", 9, "bold"),
+            padx=8,
+            pady=2,
+            relief="groove",
+            cursor="hand2",
+            command=self.mostrar_info_jwt,
+        )
+        self.btn_sesion_jwt.pack(side="left", padx=12)
 
         # Indicador de "servicio caído" leyendo servicio/estado
         self.lbl_servicio = tk.Label(
@@ -297,11 +452,11 @@ class DespachadorBasico:
             ca_file = str(ca_certs)
 
         self.cliente = MQTTPub(
-            ip_broker,
-            puerto,
-            client_id,
-            usuario=usuario,
-            password=password if password else clave(usuario),
+            self.ip_broker,
+            self.puerto,
+            self.client_id,
+            usuario=self.usuario,
+            password=self.password if self.password else clave(self.usuario),
             ca_certs=ca_file,
             sesion_persistente=True,
             expiracion_sesion=EXPIRACION_SESION_SEG,
@@ -914,6 +1069,165 @@ class DespachadorBasico:
             self.mapa.canvas.itemconfig(marcador.big_circle, fill=color_circulo, outline=color_borde)
 
     # ==========================================================================
+    # GESTIÓN Y VALIDACIÓN DE SESIÓN JWT (RFC 7519)
+    # ==========================================================================
+
+    def _verificar_autorizacion_jwt(self, operacion="operar"):
+        """Verifica que el despachador disponga de un token JWT válido y vigente."""
+        if not self.token_jwt:
+            messagebox.showerror(
+                "Acceso Denegado (JWT)",
+                f"No hay una sesión activa con token JWT para {operacion}.\nDebe iniciar sesión.",
+            )
+            return False
+
+        try:
+            self.claims_jwt = jwt_auth.verificar_token(self.token_jwt)
+            return True
+        except jwt_auth.TokenExpirado:
+            messagebox.showwarning(
+                "Sesión Expirada (JWT)",
+                "Su token JWT ha expirado.\nPor seguridad inicie sesión nuevamente.",
+            )
+            return self._renovar_sesion()
+        except jwt_auth.ErrorJWT as e:
+            messagebox.showerror(
+                "Token Inválido (JWT)",
+                f"Fallo de verificación de integridad o firma criptográfica JWT:\n{e}",
+            )
+            return False
+
+    def _actualizar_badge_jwt(self):
+        """Refleja en la barra superior si el token sigue vigente."""
+        try:
+            jwt_auth.verificar_token(self.token_jwt)
+            self.btn_sesion_jwt.config(text=f"🔑 {self.usuario} (JWT Activo 🟢)", bg="#27ae60")
+        except jwt_auth.ErrorJWT:
+            self.btn_sesion_jwt.config(text=f"🔑 {self.usuario} (JWT Vencido 🔴)", bg="#c0392b")
+
+    def _vigilar_vencimiento_jwt(self):
+        #el token vence solo: el badge no puede esperar a que el operador intente despachar
+        self._actualizar_badge_jwt()
+        self.root.after(SEG_REVISION_JWT * 1000, self._vigilar_vencimiento_jwt)
+
+    def _renovar_sesion(self):
+        """Pide login de nuevo sin cerrar la app. La conexion MQTT sigue, asi que tiene que ser el mismo usuario."""
+        self._actualizar_badge_jwt()
+        dialogo = DialogoLogin(self.root, usuario_default=self.usuario, clave_esperada=self.password)
+        self.root.wait_window(dialogo)
+        if not dialogo.resultado:
+            return False
+        usuario, _, token, claims = dialogo.resultado
+        if usuario != self.usuario:
+            messagebox.showerror("Sesión", f"La sesión tiene que renovarla {self.usuario}.")
+            return False
+        self.token_jwt, self.claims_jwt = token, claims
+        self._actualizar_badge_jwt()
+        return True
+
+    def mostrar_info_jwt(self):
+        """Muestra una ventana modal detallada con los claims y el token JWT de la sesión activa."""
+        if not self.token_jwt:
+            messagebox.showinfo("JWT", "No hay una sesión JWT activa actualmente.")
+            return
+
+        try:
+            header, payload = jwt_auth.decodificar_sin_verificar(self.token_jwt)
+            jwt_auth.verificar_token(self.token_jwt)
+            msg_validez = "VÁLIDO 🟢"
+        except jwt_auth.TokenExpirado:
+            msg_validez = "EXPIRADO 🔴"
+        except Exception as e:
+            header, payload = {}, {}
+            msg_validez = f"INVÁLIDO 🔴 ({e})"
+
+        exp = payload.get("exp", 0)
+        ahora = int(time.time())
+        restante_min = max(0, int((exp - ahora) / 60))
+
+        win = tk.Toplevel(self.root)
+        win.title("🔐 Sesión Activa - Token JWT (RFC 7519)")
+        win.geometry("680x620")
+        win.minsize(580, 520)
+        win.configure(bg="#1e272e")
+        win.transient(self.root)
+
+        tk.Label(
+            win,
+            text="Detalles de la Sesión y Token JWT",
+            font=("Helvetica", 12, "bold"),
+            bg="#1e272e",
+            fg="#f5f6fa",
+            pady=10,
+        ).pack()
+
+        frame_resumen = tk.Frame(win, bg="#2f3640", padx=12, pady=8)
+        frame_resumen.pack(fill="x", padx=15, pady=5)
+
+        tk.Label(
+            frame_resumen,
+            text=f"Operador (sub): {payload.get('sub', self.usuario)}   |   Rol: {payload.get('rol', 'despachador')}   |   Algoritmo: {header.get('alg', 'HS256')}\nEstado: {msg_validez}   |   Expira en: {restante_min} minutos (exp: {exp})",
+            font=("Helvetica", 9),
+            bg="#2f3640",
+            fg="#ecf0f1",
+            justify="left",
+        ).pack(anchor="w")
+
+        lbl_raw = tk.Label(win, text="Token Compacto (Header.Payload.Signature):", font=("Helvetica", 9, "bold"), bg="#1e272e", fg="#a4b0be")
+        lbl_raw.pack(anchor="w", padx=15, pady=(8, 2))
+
+        txt_token = tk.Text(win, height=4, font=("Consolas", 8), bg="#000000", fg="#2ecc71", wrap="char")
+        txt_token.insert("1.0", self.token_jwt)
+        txt_token.configure(state="disabled")
+        txt_token.pack(fill="x", padx=15)
+
+        def copiar():
+            self.root.clipboard_clear()
+            self.root.clipboard_append(self.token_jwt)
+            btn_copiar.config(text="¡Token Copiado al Portapapeles! ✓", bg="#27ae60")
+
+        btn_copiar = tk.Button(
+            win,
+            text="📋 Copiar Token para jwt.io",
+            bg="#34495e",
+            fg="#ffffff",
+            font=("Helvetica", 8, "bold"),
+            cursor="hand2",
+            command=copiar,
+            pady=3,
+        )
+        btn_copiar.pack(anchor="e", padx=15, pady=4)
+
+        frame_detalles = tk.Frame(win, bg="#1e272e")
+        frame_detalles.pack(fill="both", expand=True, padx=15, pady=5)
+
+        frame_hdr = tk.LabelFrame(frame_detalles, text=" Header (JSON) ", bg="#2c3e50", fg="#ecf0f1", font=("Helvetica", 9, "bold"))
+        frame_hdr.pack(fill="x", pady=4)
+        txt_hdr = tk.Text(frame_hdr, height=3, font=("Consolas", 9), bg="#1e272e", fg="#3498db")
+        txt_hdr.insert("1.0", json.dumps(header, indent=2))
+        txt_hdr.configure(state="disabled")
+        txt_hdr.pack(fill="x", padx=5, pady=5)
+
+        frame_pld = tk.LabelFrame(frame_detalles, text=" Claims / Payload (JSON) ", bg="#2c3e50", fg="#ecf0f1", font=("Helvetica", 9, "bold"))
+        frame_pld.pack(fill="both", expand=True, pady=4)
+        txt_pld = tk.Text(frame_pld, height=8, font=("Consolas", 9), bg="#1e272e", fg="#e67e22")
+        txt_pld.insert("1.0", json.dumps(payload, indent=2))
+        txt_pld.configure(state="disabled")
+        txt_pld.pack(fill="both", expand=True, padx=5, pady=5)
+
+        btn_cerrar = tk.Button(
+            win,
+            text="Cerrar",
+            bg="#7f8c8d",
+            fg="#ffffff",
+            font=("Helvetica", 9, "bold"),
+            command=win.destroy,
+            pady=4,
+            padx=12,
+        )
+        btn_cerrar.pack(pady=8)
+
+    # ==========================================================================
     # COMANDOS DE DESPACHO (TAREAS 2 Y 3: ASIGNAR Y LIBERAR)
     # ==========================================================================
 
@@ -922,6 +1236,9 @@ class DespachadorBasico:
         Publica orden en comandos/desp-01/{tipo}/{id} con el eid y un id único de comando.
         Idempotencia: Si se reintenta la misma acción (mismo móvil y mismo eid), se reutiliza el mismo ID.
         """
+        if not self._verificar_autorizacion_jwt("asignar una unidad"):
+            return
+
         if not id_unidad or not eid:
             messagebox.showwarning("Atención", "Debe seleccionar un incidente y un móvil para asignar.")
             return
@@ -956,6 +1273,9 @@ class DespachadorBasico:
         El servicio central marca la unidad como libre y cierra la emergencia.
         Idempotencia: Si se reintenta la liberación de la unidad, se reutiliza el mismo ID.
         """
+        if not self._verificar_autorizacion_jwt("liberar una unidad"):
+            return
+
         if not id_unidad:
             messagebox.showwarning("Atención", "Debe seleccionar un móvil ocupado para liberar.")
             return
@@ -1226,6 +1546,7 @@ class DespachadorBasico:
 
     def iniciar(self):
         """Inicia el bucle de eventos de la ventana gráfica."""
+        self._vigilar_vencimiento_jwt()
         self.root.mainloop()
 
     def cerrar(self):
@@ -1270,5 +1591,6 @@ if __name__ == "__main__":
         usuario=args.usuario,
         password=args.password,
         ca_certs=ca_certs,
+        pedir_login=True,
     )
     app.iniciar()
