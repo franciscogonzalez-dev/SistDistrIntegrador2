@@ -48,7 +48,12 @@ def nuevo_id():
 def _numero(valor):
     #bool es subclase de int en python, no queremos aceptar true como latitud
     #json.loads acepta NaN e Infinity: un ts NaN rompe la comparacion con el ultimo ts aceptado
-    return isinstance(valor, (int, float)) and not isinstance(valor, bool) and math.isfinite(valor)
+    if not isinstance(valor, (int, float)) or isinstance(valor, bool):
+        return False
+    try:
+        return math.isfinite(valor)
+    except OverflowError: #un entero de cientos de digitos no entra en un float
+        return False
 
 
 def _entre(minimo, maximo):
@@ -155,7 +160,7 @@ def validar(spec, payload):
     if isinstance(payload, (bytes, str)):
         try:
             payload = json.loads(payload)
-        except (TypeError, ValueError) as e:
+        except (TypeError, ValueError, RecursionError) as e: #RecursionError: JSON muy anidado
             raise PayloadInvalido(f"payload no es JSON: {e}") from e
 
     if not isinstance(payload, dict):
@@ -168,7 +173,8 @@ def validar(spec, payload):
                 raise PayloadInvalido(f"falta el campo obligatorio {campo!r}")
             continue
         if not chequeo(payload[campo]):
-            raise PayloadInvalido(f"campo {campo!r} con valor invalido: {payload[campo]!r}")
+            #recortado: este texto termina en el log y en las alertas, y lo escribe quien publica
+            raise PayloadInvalido(f"campo {campo!r} con valor invalido: {payload[campo]!r:.80}")
         datos[campo] = payload[campo]
 
     if datos["v"] not in VERSIONES_SOPORTADAS:

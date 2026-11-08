@@ -10,6 +10,7 @@ proyecto2-contexto/
 *.env
 !.env.example
 clientes/credenciales.json
+clientes/.client_id_publico*
 
 # Usuarios y claves de EMQX (REGLA DE ORO: fuera del repo)
 broker/emqx/usuarios.csv
@@ -75,3 +76,6 @@ ENV/
 *.swo
 .DS_Store
 Thumbs.db
+
+
+clientes/despachos.txt

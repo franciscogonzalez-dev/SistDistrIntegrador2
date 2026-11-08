@@ -57,6 +57,7 @@ class MQTTPub():
         self._expiracion_sesion = expiracion_sesion #segundos, solo si la sesion es persistente (docs/topics.md: servicio 24 h, despachador 1 h)
         self._suscripciones = {}
         self._al_conectar = [] #mensajes que se publican en cada conexion, ej "online"
+        self.ultimo_mid = None #mid del ultimo publish aceptado, para seguir su PUBACK en _on_publish
 
         #config cliente
         self._client = mqtt.Client(
@@ -102,10 +103,20 @@ class MQTTPub():
         if self._client.is_connected():
             self.publish(dato, topic, qos=qos, retain=retain)
 
+    def _callback_protegido(self, callback):
+        #una excepcion en un callback mata el hilo de red de paho y el proceso sigue vivo sin atender mensajes,
+        #asi que Docker no lo reinicia. Se descarta el mensaje: paho lo confirma igual y el broker no lo reentrega
+        def protegido(client, userdata, msg):
+            try:
+                callback(client, userdata, msg)
+            except Exception:
+                logger.exception("Error procesando un mensaje de '%s', se descarta", msg.topic)
+        return protegido
+
     def subscribe(self, topic, callback=None, qos=1):
         self._suscripciones[topic] = (qos, callback)
         if callback:
-            self._client.message_callback_add(topic, callback)
+            self._client.message_callback_add(topic, self._callback_protegido(callback))
         if self._client.is_connected():
             self._client.subscribe(topic, qos=qos)
 
@@ -115,11 +126,16 @@ class MQTTPub():
             logger.warning("No declaraste topicos para publicar")
             return False #tecnicamente no sirve ponerle un valor, porque esta funcion la ejecuta paho no nosotros y paho no es que usa el valor retornado para algo
 
-        try:
-            payload = json.dumps(dato)
-        except (TypeError, ValueError) as e:
-            logger.exception("dato no serializable a JSON:%s",e)
-            return False
+        if isinstance(dato, (bytes, bytearray)):
+            payload = dato
+        elif isinstance(dato, str) and dato == "":
+            payload = b""
+        else:
+            try:
+                payload = json.dumps(dato)
+            except (TypeError, ValueError) as e:
+                logger.exception("dato no serializable a JSON:%s",e)
+                return False
 
         try:
             info_msg = self._client.publish(topic, payload, qos=qos, retain=retain) # este metodo devuelve un MQTTMessageInfo,
@@ -144,6 +160,7 @@ class MQTTPub():
             logger.error("publish fallo, rc: %s", info_msg.rc)
             return False
 
+        self.ultimo_mid = info_msg.mid
         return True
 
     def _on_connect(self, client, userdata, connect_flags, reason_code, properties):

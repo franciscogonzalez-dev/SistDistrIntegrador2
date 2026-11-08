@@ -17,7 +17,7 @@ SistDistrIntegrador2/
 │   ├── emqx/                     # configuracion versionada, sobrevive a borrar el container
 │   │   ├── usuarios              # usuarios y claves (las reales fuera del repo) (#6)
 │   │   ├── acl.conf              # reglas por patron de usuario + deny final (#2, #6)
-│   │   └── webhooks/reglas       # webhook directo y regla SQL de emergencia sin asignar (#17)
+│   │   └── emqx.conf             # autenticacion, ACL y los webhooks: directo y regla de publicacion denegada (#6, #17)
 │   └── certs/                    # ca.crt y server.crt (las .key no se suben) (#4)
 │
 ├── receptor/                     # servidor HTTP que recibe los webhooks (#7)
